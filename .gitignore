@@ -5,3 +5,4 @@ __pycache__
 .specstory
 .cursorindexingignore
 .cursorignore
+.DS_Store
