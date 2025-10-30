@@ -115,8 +115,8 @@ class PhysicsInformedNN(nn.Module):
         # Traffic flow PDE - adjust parameters for A13 highway if needed
         # f = 0.20 * u_x - 2 * 0.20 / 46.64 * u * u_x - 0.20 / 46.64 * u_t
         V_f = 110  # Free flow speed (km/h)
-        t_scale = 4 # 0.25 hours
-        f = (u_x - 2/V_f*u*u_x - 1/V_f*u_t*4)
+        t_scale = 0.25 # 0.25 hours
+        f = (u_x - 2/V_f*u*u_x - 1/V_f*u_t*t_scale)
         return f
 
     def loss_closure(self):
@@ -282,7 +282,7 @@ if __name__ == "__main__":
     
     # Load A13 velocity data
     #TODO: change the dataset with gap
-    vel = pd.read_table('data/A13_Velocity_Data_0909-0913.txt', delim_whitespace=True, header=None)
+    vel = pd.read_table('data/A13_Velocity_Data_0909-0910.txt', delim_whitespace=True, header=None)
     # discard the first row of the dataframe
     vel = vel.iloc[1:]
     # vel = vel.values
@@ -377,11 +377,11 @@ if __name__ == "__main__":
     # }
     # mpl.rcParams.update(pgf_with_latex)
     
-    fig = plt.figure(figsize=(12, 10))
+    fig = plt.figure(figsize=(12, 16))
 
     ####### Row 0: Ground Truth ##################
     gs0 = gridspec.GridSpec(1, 2)
-    gs0.update(top=0.96, bottom=0.70, left=0.15, right=0.85, wspace=0)
+    gs0.update(top=0.96, bottom=0.70, left=0.15, right=0.85, wspace=1)
 
     ax = plt.subplot(gs0[:, :])
     ax.tick_params(axis='both', which='major', labelsize=16)
@@ -399,7 +399,7 @@ if __name__ == "__main__":
     
     ####### Row 1: PIDL: u(t,x) ##################
     gs1 = gridspec.GridSpec(1, 2)
-    gs1.update(top=0.64, bottom=0.38, left=0.15, right=0.85, wspace=0)
+    gs1.update(top=0.60, bottom=0.34, left=0.15, right=0.85, wspace=1)
 
     ax = plt.subplot(gs1[:, :])
     ax.tick_params(axis='both', which='major', labelsize=16)
@@ -419,7 +419,7 @@ if __name__ == "__main__":
 
     ####### Row 2: DL: u(t,x) ##################
     gs2 = gridspec.GridSpec(1, 2)
-    gs2.update(top=0.32, bottom=0.06, left=0.15, right=0.85, wspace=0)
+    gs2.update(top=0.30, bottom=0.0, left=0.15, right=0.85, wspace=1)
 
     ax = plt.subplot(gs2[:, :])
     ax.tick_params(axis='both', which='major', labelsize=16)
