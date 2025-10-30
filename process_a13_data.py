@@ -99,7 +99,7 @@ if __name__ == "__main__":
     # Configuration
     data_dir = "data"
     start_date = "2024-09-09"
-    end_date = "2024-09-10"
+    end_date = "2024-09-13"
     output_file = f"data/A13_Velocity_Data_{start_date[5:7]}{start_date[8:10]}-{end_date[5:7]}{end_date[8:10]}.txt"
     
     print("=" * 60)

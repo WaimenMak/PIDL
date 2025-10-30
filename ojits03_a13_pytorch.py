@@ -270,7 +270,7 @@ class NN(nn.Module):
 
 
 if __name__ == "__main__":
-
+    #TODO: Adjust N_u and N_f
     N_u = 800
     N_f = 10000
     layers = [2, 20, 20, 20, 20, 20, 20, 20, 20, 1]
@@ -281,7 +281,7 @@ if __name__ == "__main__":
     x = data['xScale'].T.flatten()[:, None]
     
     # Load A13 velocity data
-    vel = pd.read_table('data/A13_Velocity_Data_0909-0910.txt', delim_whitespace=True, header=None)
+    vel = pd.read_table('data/A13_Velocity_Data_0909-0913.txt', delim_whitespace=True, header=None)
     # discard the first row of the dataframe
     vel = vel.iloc[1:]
     # vel = vel.values
@@ -321,6 +321,7 @@ if __name__ == "__main__":
     idx = np.random.choice(valid_indices, n_valid, replace=False)
     
     X_u_train = X_star[idx, :]
+    #TODO: add noise to speed, u_train = u_star[idx, :] + noise
     u_train = u_star[idx, :]
     X_f_train = lb + (ub - lb) * lhs(2, N_f)
     X_f_train = np.vstack((X_f_train, X_u_train))
@@ -328,20 +329,20 @@ if __name__ == "__main__":
     ############################### Training Data #################################
 
     # PINN Model
-    print("\n" + "="*60)
-    print("Training PINN Model...")
-    print("="*60)
-    # Enable label normalization to help PINN learn better
-    model = PhysicsInformedNN(X_u_train, u_train, X_f_train, layers, lb, ub, normalize_labels=True)
-    start_time = time.time()
-    model.train_model()
-    elapsed = time.time() - start_time
-    print(f'Training time: {elapsed:.4f} seconds')
-    u_pred, f_pred = model.predict(X_star)
-    error_u = np.linalg.norm(u_star - u_pred, 2) / np.linalg.norm(u_star, 2)
-    print(f'PINN Error u: {error_u:.4e}')
-    U_pred = griddata(X_star, u_pred.flatten(), (X, T), method='cubic')
-    Error = np.abs(Exact - U_pred)
+    # print("\n" + "="*60)
+    # print("Training PINN Model...")
+    # print("="*60)
+    # # Enable label normalization to help PINN learn better
+    # model = PhysicsInformedNN(X_u_train, u_train, X_f_train, layers, lb, ub, normalize_labels=True)
+    # start_time = time.time()
+    # model.train_model()
+    # elapsed = time.time() - start_time
+    # print(f'Training time: {elapsed:.4f} seconds')
+    # u_pred, f_pred = model.predict(X_star)
+    # error_u = np.linalg.norm(u_star - u_pred, 2) / np.linalg.norm(u_star, 2)
+    # print(f'PINN Error u: {error_u:.4e}')
+    # U_pred = griddata(X_star, u_pred.flatten(), (X, T), method='cubic')
+    # Error = np.abs(Exact - U_pred)
 
     # Regular NN Model
     print("\n" + "="*60)
@@ -396,24 +397,24 @@ if __name__ == "__main__":
     ax.set_title('Ground Truth: A13 Highway Speed (km/h)', fontsize=18)
     
     ####### Row 1: PIDL: u(t,x) ##################
-    gs1 = gridspec.GridSpec(1, 2)
-    gs1.update(top=0.64, bottom=0.38, left=0.15, right=0.85, wspace=0)
-
-    ax = plt.subplot(gs1[:, :])
-    ax.tick_params(axis='both', which='major', labelsize=16)
-    h = ax.imshow(U_pred, interpolation='nearest', cmap='rainbow_r',
-                  extent=[x.min(), x.max(), t.min(), t.max()],
-                  origin='lower', aspect='auto')
-
-    divider = make_axes_locatable(ax)
-    cax = divider.append_axes("right", size="5%", pad=0.05)
-    cax.tick_params(labelsize=16)
-    fig.colorbar(h, cax=cax)
-
-    ax.plot(X_u_train[:, 0], X_u_train[:, 1], 'kx', markersize=0.8, clip_on=False)
-    ax.set_ylabel('Time $t$ (15 min)', fontsize=18)
-    ax.set_xlabel('Location $x$ (km)', fontsize=18)
-    ax.set_title(f'PIDL Estimation (Error: {error_u:.4f})', fontsize=18)
+    # gs1 = gridspec.GridSpec(1, 2)
+    # gs1.update(top=0.64, bottom=0.38, left=0.15, right=0.85, wspace=0)
+    #
+    # ax = plt.subplot(gs1[:, :])
+    # ax.tick_params(axis='both', which='major', labelsize=16)
+    # h = ax.imshow(U_pred, interpolation='nearest', cmap='rainbow_r',
+    #               extent=[x.min(), x.max(), t.min(), t.max()],
+    #               origin='lower', aspect='auto')
+    #
+    # divider = make_axes_locatable(ax)
+    # cax = divider.append_axes("right", size="5%", pad=0.05)
+    # cax.tick_params(labelsize=16)
+    # fig.colorbar(h, cax=cax)
+    #
+    # ax.plot(X_u_train[:, 0], X_u_train[:, 1], 'kx', markersize=0.8, clip_on=False)
+    # ax.set_ylabel('Time $t$ (15 min)', fontsize=18)
+    # ax.set_xlabel('Location $x$ (km)', fontsize=18)
+    # ax.set_title(f'PIDL Estimation (Error: {error_u:.4f})', fontsize=18)
 
     ####### Row 2: DL: u(t,x) ##################
     gs2 = gridspec.GridSpec(1, 2)
