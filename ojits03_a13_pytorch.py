@@ -26,7 +26,7 @@ torch.manual_seed(se)
 
 # PINN Class
 class PhysicsInformedNN(nn.Module):
-    def __init__(self, X_u, u, X_f, layers, lb, ub):
+    def __init__(self, X_u, u, X_f, layers, lb, ub, normalize_labels=True):
         super(PhysicsInformedNN, self).__init__()
 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -36,16 +36,34 @@ class PhysicsInformedNN(nn.Module):
 
         self.x_u = torch.tensor(X_u[:, 0:1], dtype=torch.float32).to(self.device)
         self.t_u = torch.tensor(X_u[:, 1:2], dtype=torch.float32).to(self.device)
-        self.u = torch.tensor(u, dtype=torch.float32).to(self.device)
         
+        # Label normalization
+        self.normalize_labels = normalize_labels
+        if self.normalize_labels:
+            self.u_mean = torch.mean(torch.tensor(u, dtype=torch.float32))
+            self.u_std = torch.std(torch.tensor(u, dtype=torch.float32))
+            # Avoid division by zero
+            if self.u_std < 1e-8:
+                self.u_std = torch.tensor(1.0)
+            # Normalize labels: (u - mean) / std
+            u_normalized = (u - self.u_mean.cpu().numpy()) / self.u_std.cpu().numpy()
+            self.u = torch.tensor(u_normalized, dtype=torch.float32).to(self.device)
+            self.u_mean = self.u_mean.to(self.device)
+            self.u_std = self.u_std.to(self.device)
+            print(f"[PINN] Label normalization: mean={self.u_mean.item():.2f}, std={self.u_std.item():.2f}")
+        else:
+            self.u = torch.tensor(u, dtype=torch.float32).to(self.device)
+            self.u_mean = torch.tensor(0.0).to(self.device)
+            self.u_std = torch.tensor(1.0).to(self.device)
+
         self.x_f = torch.tensor(X_f[:, 0:1], dtype=torch.float32, requires_grad=True).to(self.device)
         self.t_f = torch.tensor(X_f[:, 1:2], dtype=torch.float32, requires_grad=True).to(self.device)
 
         self.layers = layers
         self.model = self.initialize_NN(layers).to(self.device)
-        
+
         self.optimizer = torch.optim.LBFGS(
-            self.model.parameters(), 
+            self.model.parameters(),
             max_iter=20000,
             max_eval=10000,
             history_size=50,
@@ -61,7 +79,7 @@ class PhysicsInformedNN(nn.Module):
             modules.append(nn.Linear(layers[i], layers[i+1]))
             if i < len(layers) - 2:
                 modules.append(nn.Tanh())
-        
+
         model = nn.Sequential(*modules)
         for m in model.modules():
             if isinstance(m, nn.Linear):
@@ -79,14 +97,14 @@ class PhysicsInformedNN(nn.Module):
 
     def net_f(self, x, t):
         u = self.net_u(x, t)
-        
+
         u_t = torch.autograd.grad(
-            u, t, 
+            u, t,
             grad_outputs=torch.ones_like(u),
             retain_graph=True,
             create_graph=True
         )[0]
-        
+
         u_x = torch.autograd.grad(
             u, x,
             grad_outputs=torch.ones_like(u),
@@ -103,12 +121,12 @@ class PhysicsInformedNN(nn.Module):
 
     def loss_closure(self):
         self.optimizer.zero_grad()
-        
+
         u_pred = self.net_u(self.x_u, self.t_u)
         f_pred = self.net_f(self.x_f, self.t_f)
-        
+
         loss = torch.mean(torch.square(self.u - u_pred)) + torch.mean(torch.square(f_pred))
-        
+
         loss.backward()
         self.iter += 1
         if self.iter % 100 == 0:
@@ -118,25 +136,29 @@ class PhysicsInformedNN(nn.Module):
     def train_model(self):
         self.model.train()
         self.optimizer.step(self.loss_closure)
-        
+
     def predict(self, X_star):
         self.model.eval()
         X_star = X_star.astype(np.float32)
         x_star = torch.tensor(X_star[:, 0:1], dtype=torch.float32).to(self.device)
         t_star = torch.tensor(X_star[:, 1:2], dtype=torch.float32).to(self.device)
-        
+
         u_star = self.net_u(x_star, t_star)
         
+        # Denormalize predictions if labels were normalized
+        if self.normalize_labels:
+            u_star = torch.clip(u_star * self.u_std + self.u_mean, min=torch.tensor([0.0]))
+
         x_f_star = torch.tensor(X_star[:, 0:1], dtype=torch.float32, requires_grad=True).to(self.device)
         t_f_star = torch.tensor(X_star[:, 1:2], dtype=torch.float32, requires_grad=True).to(self.device)
         f_star = self.net_f(x_f_star, t_f_star)
-        
+
         return u_star.cpu().detach().numpy(), f_star.cpu().detach().numpy()
 
 
 # Regular NN class
 class NN(nn.Module):
-    def __init__(self, X_u, u, X_f, layers, lb, ub):
+    def __init__(self, X_u, u, X_f, layers, lb, ub, normalize_labels=True):
         super(NN, self).__init__()
         
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -146,7 +168,25 @@ class NN(nn.Module):
 
         self.x_u = torch.tensor(X_u[:, 0:1], dtype=torch.float32).to(self.device)
         self.t_u = torch.tensor(X_u[:, 1:2], dtype=torch.float32).to(self.device)
-        self.u = torch.tensor(u, dtype=torch.float32).to(self.device)
+        
+        # Label normalization
+        self.normalize_labels = normalize_labels
+        if self.normalize_labels:
+            self.u_mean = torch.mean(torch.tensor(u, dtype=torch.float32))
+            self.u_std = torch.std(torch.tensor(u, dtype=torch.float32))
+            # Avoid division by zero
+            if self.u_std < 1e-8:
+                self.u_std = torch.tensor(1.0)
+            # Normalize labels: (u - mean) / std
+            u_normalized = (u - self.u_mean.cpu().numpy()) / self.u_std.cpu().numpy()
+            self.u = torch.tensor(u_normalized, dtype=torch.float32).to(self.device)
+            self.u_mean = self.u_mean.to(self.device)
+            self.u_std = self.u_std.to(self.device)
+            print(f"[NN] Label normalization: mean={self.u_mean.item():.2f}, std={self.u_std.item():.2f}")
+        else:
+            self.u = torch.tensor(u, dtype=torch.float32).to(self.device)
+            self.u_mean = torch.tensor(0.0).to(self.device)
+            self.u_std = torch.tensor(1.0).to(self.device)
         
         self.x_f = torch.tensor(X_f[:, 0:1], dtype=torch.float32, requires_grad=True).to(self.device)
         self.t_f = torch.tensor(X_f[:, 1:2], dtype=torch.float32, requires_grad=True).to(self.device)
@@ -156,7 +196,7 @@ class NN(nn.Module):
         
         self.optimizer = torch.optim.LBFGS(
             self.model.parameters(), 
-            max_iter=10000,
+            max_iter=20000,
             max_eval=10000,
             history_size=50,
             tolerance_grad=1e-5,
@@ -194,7 +234,7 @@ class NN(nn.Module):
         V_f = 110  # Free flow speed (km/h)
         t_scale = 4 # 0.25 hours
         f = 0.2*(u_x - 2/V_f*u*u_x - 1/V_f*u_t*4)
-        return f
+        return torch.tensor([0])  # Return zero since we don't use f in loss
 
     def loss_closure(self):
         self.optimizer.zero_grad()
@@ -218,6 +258,10 @@ class NN(nn.Module):
         
         u_star = self.net_u(x_star, t_star)
         
+        # Denormalize predictions if labels were normalized
+        if self.normalize_labels:
+            u_star = u_star * self.u_std + self.u_mean
+        
         x_f_star = torch.tensor(X_star[:, 0:1], dtype=torch.float32, requires_grad=True).to(self.device)
         t_f_star = torch.tensor(X_star[:, 1:2], dtype=torch.float32, requires_grad=True).to(self.device)
         f_star = self.net_f(x_f_star, t_f_star)
@@ -227,7 +271,7 @@ class NN(nn.Module):
 
 if __name__ == "__main__":
 
-    N_u = 2000
+    N_u = 800
     N_f = 10000
     layers = [2, 20, 20, 20, 20, 20, 20, 20, 20, 1]
     
@@ -287,7 +331,8 @@ if __name__ == "__main__":
     print("\n" + "="*60)
     print("Training PINN Model...")
     print("="*60)
-    model = PhysicsInformedNN(X_u_train, u_train, X_f_train, layers, lb, ub)
+    # Enable label normalization to help PINN learn better
+    model = PhysicsInformedNN(X_u_train, u_train, X_f_train, layers, lb, ub, normalize_labels=True)
     start_time = time.time()
     model.train_model()
     elapsed = time.time() - start_time
@@ -302,7 +347,8 @@ if __name__ == "__main__":
     print("\n" + "="*60)
     print("Training Regular NN Model...")
     print("="*60)
-    model2 = NN(X_u_train, u_train, X_f_train, layers, lb, ub)
+    # Enable label normalization to help NN learn better (prevents constant predictions)
+    model2 = NN(X_u_train, u_train, X_f_train, layers, lb, ub, normalize_labels=True)
     start_time2 = time.time()
     model2.train_model()
     elapsed2 = time.time() - start_time2
@@ -334,7 +380,7 @@ if __name__ == "__main__":
     ####### Row 0: Ground Truth ##################
     gs0 = gridspec.GridSpec(1, 2)
     gs0.update(top=0.96, bottom=0.70, left=0.15, right=0.85, wspace=0)
-    
+
     ax = plt.subplot(gs0[:, :])
     ax.tick_params(axis='both', which='major', labelsize=16)
     h = ax.imshow(Exact, interpolation='nearest', cmap='rainbow_r',
