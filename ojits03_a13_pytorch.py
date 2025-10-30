@@ -260,7 +260,7 @@ class NN(nn.Module):
         
         # Denormalize predictions if labels were normalized
         if self.normalize_labels:
-            u_star = u_star * self.u_std + self.u_mean
+            u_star = torch.clip(u_star * self.u_std + self.u_mean, min=torch.tensor([0.0]))
         
         x_f_star = torch.tensor(X_star[:, 0:1], dtype=torch.float32, requires_grad=True).to(self.device)
         t_f_star = torch.tensor(X_star[:, 1:2], dtype=torch.float32, requires_grad=True).to(self.device)
@@ -281,6 +281,7 @@ if __name__ == "__main__":
     x = data['xScale'].T.flatten()[:, None]
     
     # Load A13 velocity data
+    #TODO: change the dataset with gap
     vel = pd.read_table('data/A13_Velocity_Data_0909-0913.txt', delim_whitespace=True, header=None)
     # discard the first row of the dataframe
     vel = vel.iloc[1:]
