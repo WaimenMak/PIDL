@@ -279,7 +279,7 @@ if __name__ == "__main__":
     # False: Random sampling of N_u points from all valid points (scattered observations)
     # True:  Select n_sensors complete columns equally distributed (realistic fixed sensor placement)
     chose_obs_based_on_sensor = True
-    n_sensors = 10  # Number of sensor columns to select (only used when chose_obs_based_on_sensor=True)
+    n_sensors = 5  # Number of sensor columns to select (only used when chose_obs_based_on_sensor=True)
                    # Sensors will be equally spaced across the highway and take ALL their observations
     
     layers = [2, 20, 20, 20, 20, 20, 20, 20, 20, 1]
