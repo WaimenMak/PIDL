@@ -17,6 +17,7 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 from matplotlib.ticker import MultipleLocator
 import pandas as pd
 import os
+import json
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
 se = 25
@@ -116,7 +117,7 @@ class PhysicsInformedNN(nn.Module):
         # f = 0.20 * u_x - 2 * 0.20 / 46.64 * u * u_x - 0.20 / 46.64 * u_t
         V_f = 110  # Free flow speed (km/h)
         t_scale = 0.25 # 0.25 hours
-        f = (u_x - 2/V_f*u*u_x - 1/V_f*u_t*t_scale)
+        f = (u_x - 2/V_f*u*u_x - 1/V_f*u_t)*t_scale
         return f
 
     def loss_closure(self):
@@ -271,8 +272,16 @@ class NN(nn.Module):
 
 if __name__ == "__main__":
     #TODO: Adjust N_u and N_f
-    N_u = 800
+    N_u = 800  # Number of points for random sampling (only used when chose_obs_based_on_sensor=False)
     N_f = 10000
+    
+    # ==== Data Selection Strategy ====
+    # False: Random sampling of N_u points from all valid points (scattered observations)
+    # True:  Select n_sensors complete columns equally distributed (realistic fixed sensor placement)
+    chose_obs_based_on_sensor = True
+    n_sensors = 10  # Number of sensor columns to select (only used when chose_obs_based_on_sensor=True)
+                   # Sensors will be equally spaced across the highway and take ALL their observations
+    
     layers = [2, 20, 20, 20, 20, 20, 20, 20, 20, 1]
     
     # Use synthetic.mat for spatial-temporal grid structure
@@ -291,7 +300,13 @@ if __name__ == "__main__":
     print(f"Time steps: {vel.shape[1]}")
     
     # Adjust spatial-temporal grid to match data dimensions
-    x = x[:vel.shape[0]]  # 30 locations
+    # x = x[:vel.shape[0]]  # 30 locations
+    # x = np.arange(vel.shape[0]).reshape(-1, 1)
+    # use real distance from json file
+    with open('td_data/2024-09-09.json', 'r') as f:
+        distance = json.load(f)
+    x = np.array(distance['distances']).reshape(-1, 1)[:vel.shape[0]]
+
     # t = t[:vel.shape[1]]  # 480 time steps
     t = np.arange(vel.shape[1]).reshape(-1, 1)
 
@@ -300,6 +315,9 @@ if __name__ == "__main__":
     X, T = np.meshgrid(x, t)
 
     X_star = np.hstack((X.flatten()[:, None], T.flatten()[:, None]))
+    x_idx = np.arange(Exact.shape[0])
+    idx_flatten, t_idx = np.meshgrid(x_idx, t)
+    idx_grid = np.hstack((idx_flatten.flatten()[:, None], t_idx.flatten()[:, None]))
     u_star = Exact.flatten()[:, None]
     
     # Replace missing values (-1) with mean of valid values
@@ -313,20 +331,72 @@ if __name__ == "__main__":
     ub = X_star.max(0).astype(np.float32)
 
     ############################### Training Data #################################
-    # Use only valid data points for training
-    valid_train_mask = u_star.flatten() > 0
-    valid_indices = np.where(valid_train_mask)[0]
+    n_locations = x.shape[0]
+    n_timesteps = t.shape[0]
     
-    # Sample from valid points
-    n_valid = min(N_u, len(valid_indices))
-    idx = np.random.choice(valid_indices, n_valid, replace=False)
+    if not chose_obs_based_on_sensor:
+        # ==== METHOD 1: Random sampling from all valid points (original) ====
+        print("\n[Data Selection] Using random sampling from all valid points")
+        valid_train_mask = u_star.flatten() > 0
+        valid_indices = np.where(valid_train_mask)[0]
+        
+        n_valid = min(N_u, len(valid_indices))
+        idx = np.random.choice(valid_indices, n_valid, replace=False)
+        
+        X_u_train = X_star[idx, :]
+        idx_train = idx_grid[idx, :].astype(int)
+        u_train = u_star[idx, :]
+        
+        print(f"  - Total valid points: {len(valid_indices)}")
+        print(f"  - Sampled points: {n_valid}")
+        
+    else:
+        # ==== METHOD 2: Select complete sensor columns (equally distributed) ====
+        print("\n[Data Selection] Using sensor-based column selection (equally distributed)")
+        u_star_matrix = u_star.reshape((n_timesteps, n_locations))  # reshape to [t, x]
+        
+        # Select n_sensors equally distributed across spatial domain
+        n_sensors_to_select = min(n_sensors, n_locations)
+        selected_sensors = np.linspace(0, n_locations-1, n_sensors_to_select, dtype=int)
+        selected_sensors = np.unique(selected_sensors)  # Remove duplicates if any
+        selected_sensors = selected_sensors.tolist()
+        
+        # Collect all valid points from selected sensors
+        selected_indices = []
+        selected_idx_grid = []
+        sensor_point_counts = []
+        
+        for col in selected_sensors:
+            valid_rows = np.where(u_star_matrix[:, col] > 0)[0]
+            n_pts = len(valid_rows)
+            sensor_point_counts.append((col, n_pts))
+            
+            for row in valid_rows:
+                flat_idx = col + row * n_locations  # Convert (row, col) to flat index
+                selected_indices.append(flat_idx)
+                selected_idx_grid.append([row, col])  # [t_idx, x_idx]
+        
+        idx = np.array(selected_indices)
+        idx_train = np.array(selected_idx_grid)
+        X_u_train = X_star[idx, :]
+        u_train = u_star[idx, :]
+        n_valid = len(idx)
+        
+        print(f"  - Total available locations: {n_locations}")
+        print(f"  - Requested sensors: {n_sensors}")
+        print(f"  - Selected sensors: {len(selected_sensors)} (equally spaced)")
+        print(f"  - Sensor indices: {selected_sensors}")
+        print(f"  - Total observation points: {n_valid}")
+        
+        # Show points per selected sensor
+        for col, n_pts in sensor_point_counts:
+            print(f"    · Sensor {col}: {n_pts} points")
     
-    X_u_train = X_star[idx, :]
+    # Common operations for both methods
     #TODO: add noise to speed, u_train = u_star[idx, :] + noise
-    u_train = u_star[idx, :]
     X_f_train = lb + (ub - lb) * lhs(2, N_f)
     X_f_train = np.vstack((X_f_train, X_u_train))
-    print(f"\nTraining with {n_valid} data points")
+    print(f"\nTraining with {n_valid} data points (+ {N_f} collocation points)")
     ############################### Training Data #################################
 
     # PINN Model
@@ -377,11 +447,11 @@ if __name__ == "__main__":
     # }
     # mpl.rcParams.update(pgf_with_latex)
     
-    fig = plt.figure(figsize=(12, 16))
+    fig = plt.figure(figsize=(12, 20))
 
     ####### Row 0: Ground Truth ##################
     gs0 = gridspec.GridSpec(1, 2)
-    gs0.update(top=0.96, bottom=0.70, left=0.15, right=0.85, wspace=1)
+    gs0.update(top=0.97, bottom=0.77, left=0.15, right=0.85, wspace=1)
 
     ax = plt.subplot(gs0[:, :])
     ax.tick_params(axis='both', which='major', labelsize=16)
@@ -397,9 +467,50 @@ if __name__ == "__main__":
     ax.set_xlabel('Location $x$ (km)', fontsize=18)
     ax.set_title('Ground Truth: A13 Highway Speed (km/h)', fontsize=18)
     
-    ####### Row 1: PIDL: u(t,x) ##################
+    ####### Row 1: Observation Data ##################
+    gs_obs = gridspec.GridSpec(1, 2)
+    gs_obs.update(top=0.72, bottom=0.52, left=0.15, right=0.85, wspace=1)
+    
+    ax = plt.subplot(gs_obs[:, :])
+    ax.tick_params(axis='both', which='major', labelsize=16)
+    
+    # Create observation data matrix (only training points visible, rest is white/NaN)
+    Observation = np.full_like(Exact, np.nan)  # Initialize with NaN
+    for i, (x_train, t_train) in enumerate(X_u_train):
+        # Find closest grid point
+        # x_idx = np.argmin(np.abs(x.flatten() - x_train))
+        # t_idx = np.argmin(np.abs(t.flatten() - t_train))
+        x_idx = idx_train[i, 1]
+        t_idx = idx_train[i, 0]
+        # Observation[t_idx, x_idx] = u_train[i, 0]
+        Observation[t_idx, x_idx] = Exact[t_idx, x_idx]
+    
+    # Create custom colormap with white for NaN values
+    cmap = plt.cm.rainbow_r.copy()
+    cmap.set_bad(color='white')
+    
+    h = ax.imshow(Observation, interpolation='nearest', cmap=cmap,
+                  extent=[x.min(), x.max(), t.min(), t.max()],
+                  origin='lower', aspect='auto')
+    
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes("right", size="5%", pad=0.05)
+    cax.tick_params(labelsize=16)
+    fig.colorbar(h, cax=cax)
+    
+    ax.plot(X_u_train[:, 0], X_u_train[:, 1], 'k.', markersize=1.5, clip_on=False, alpha=0.5)
+    ax.set_ylabel('Time $t$ (15 min)', fontsize=18)
+    ax.set_xlabel('Location $x$ (km)', fontsize=18)
+    if chose_obs_based_on_sensor:
+        method_str = f"{n_sensors_to_select} sensors"
+        title_str = f'Observation Data (N={n_valid} points from {method_str})'
+    else:
+        title_str = f'Observation Data (N={n_valid} points, Random sampling)'
+    ax.set_title(title_str, fontsize=18)
+    
+    ####### Row 2: PIDL: u(t,x) ##################
     gs1 = gridspec.GridSpec(1, 2)
-    gs1.update(top=0.60, bottom=0.34, left=0.15, right=0.85, wspace=1)
+    gs1.update(top=0.47, bottom=0.27, left=0.15, right=0.85, wspace=1)
 
     ax = plt.subplot(gs1[:, :])
     ax.tick_params(axis='both', which='major', labelsize=16)
@@ -417,9 +528,9 @@ if __name__ == "__main__":
     ax.set_xlabel('Location $x$ (km)', fontsize=18)
     ax.set_title(f'PIDL Estimation (Error: {error_u:.4f})', fontsize=18)
 
-    ####### Row 2: DL: u(t,x) ##################
+    ####### Row 3: DL: u(t,x) ##################
     gs2 = gridspec.GridSpec(1, 2)
-    gs2.update(top=0.30, bottom=0.0, left=0.15, right=0.85, wspace=1)
+    gs2.update(top=0.22, bottom=0.02, left=0.15, right=0.85, wspace=1)
 
     ax = plt.subplot(gs2[:, :])
     ax.tick_params(axis='both', which='major', labelsize=16)
