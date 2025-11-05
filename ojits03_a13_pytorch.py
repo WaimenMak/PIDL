@@ -197,7 +197,7 @@ class NN(nn.Module):
         
         self.optimizer = torch.optim.LBFGS(
             self.model.parameters(), 
-            max_iter=20000,
+            max_iter=10000,
             max_eval=10000,
             history_size=50,
             tolerance_grad=1e-5,

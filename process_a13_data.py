@@ -98,7 +98,9 @@ def save_velocity_data(data, output_filepath, format_type='space_delimited'):
 if __name__ == "__main__":
     # Configuration
     data_dir = "data"
-    start_date = "2024-09-06"
+    start_date = "2024-09-11"
+    # start_date = "2024-09-06"
+    # end_date = "2024-09-09"
     end_date = "2024-09-13"
     output_file = f"data/A13_Velocity_Data_{start_date[5:7]}{start_date[8:10]}-{end_date[5:7]}{end_date[8:10]}.txt"
     
@@ -194,10 +196,10 @@ if __name__ == "__main__":
     # Save figure
     if not os.path.exists('figures'):
         os.makedirs('figures')
-    
-    plt.savefig('figures/a13_spacetime_diagram.pdf', dpi=300, bbox_inches='tight')
-    plt.savefig('figures/a13_spacetime_diagram.png', dpi=300, bbox_inches='tight')
-    print("✓ Space-time diagram saved to figures/a13_spacetime_diagram.pdf/png")
+
+    plt.savefig('figures/a13_spacetime_diagram_{}_{}.pdf'.format(start_date, end_date), dpi=300, bbox_inches='tight')
+    plt.savefig('figures/a13_spacetime_diagram_{}_{}.png'.format(start_date, end_date), dpi=300, bbox_inches='tight')
+    print("✓ Space-time diagram saved to figures/a13_spacetime_diagram_{}_{}.pdf/png".format(start_date, end_date))
     
     # Display figure
     plt.show()

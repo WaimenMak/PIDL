@@ -77,25 +77,106 @@ if __name__ == "__main__":
     ub = X_star.max(0).astype(np.float32)
 
     ############### Helper Functions ################
-    def run_once(N_u, N_f, u_obs_noise):
+    def run_once(x,t,u_star,
+                 chose_obs_based_on_sensors=False,
+                 n_sensors = 5,
+                 N_u=800, 
+                 N_f=10000, 
+                 u_obs_noise_type=None, 
+                 u_obs_noise_level=None):
 
         print("\n" + "#"*60)
-        print(f"Running sensitivity analysis with N_u={N_u}, N_f={N_f}, noise={u_obs_noise*100:.1f}%")
+        if chose_obs_based_on_sensors:
+            print(f"Using sensor-based observation with {n_sensors} sensors")
+        else:
+            print("Using random observation points")
+            print(f"N_u={N_u}")
+        print(f"N_f={N_f}")
+        print(f"Noise Level: {u_obs_noise_level} ({u_obs_noise_type} distribution)")
         print("#"*60)
         ############################### Training Data #################################
-        # Use only valid data points for training
-        valid_train_mask = u_star.flatten() > 0
-        valid_indices = np.where(valid_train_mask)[0]
+        n_locations = x.shape[0]
+        n_timesteps = t.shape[0]
+
+        if not chose_obs_based_on_sensors:
+            # ==== METHOD 1: Random sampling from all valid points (original) ====
+            print("\n[Data Selection] Using random sampling from all valid points")
+            valid_train_mask = u_star.flatten() > 0
+            valid_indices = np.where(valid_train_mask)[0]
+            
+            n_valid = min(N_u, len(valid_indices))
+            idx = np.random.choice(valid_indices, n_valid, replace=False)
+            
+            X_u_train = X_star[idx, :]
+            idx_train = idx_grid[idx, :].astype(int)
+            u_train = u_star[idx, :]
+            
+            print(f"  - Total valid points: {len(valid_indices)}")
+            print(f"  - Sampled points: {n_valid}")
+            
+        else:
+            # ==== METHOD 2: Select complete sensor columns (equally distributed) ====
+            print("\n[Data Selection] Using sensor-based column selection (equally distributed)")
+            u_star_matrix = u_star.reshape((n_timesteps, n_locations))  # reshape to [t, x]
+            
+            # Select n_sensors equally distributed across spatial domain
+            n_sensors_to_select = min(n_sensors, n_locations)
+            selected_sensors = np.linspace(0, n_locations-1, n_sensors_to_select, dtype=int)
+            selected_sensors = np.unique(selected_sensors)  # Remove duplicates if any
+            selected_sensors = selected_sensors.tolist()
+            
+            # Collect all valid points from selected sensors
+            selected_indices = []
+            selected_idx_grid = []
+            sensor_point_counts = []
+            
+            for col in selected_sensors:
+                valid_rows = np.where(u_star_matrix[:, col] > 0)[0]
+                n_pts = len(valid_rows)
+                sensor_point_counts.append((col, n_pts))
+                
+                for row in valid_rows:
+                    flat_idx = col + row * n_locations  # Convert (row, col) to flat index
+                    selected_indices.append(flat_idx)
+                    selected_idx_grid.append([row, col])  # [t_idx, x_idx]
+            
+            idx = np.array(selected_indices)
+            idx_train = np.array(selected_idx_grid)
+            X_u_train = X_star[idx, :]
+            u_train = u_star[idx, :]
+            n_valid = len(idx)
+            
+            print(f"  - Total available locations: {n_locations}")
+            print(f"  - Requested sensors: {n_sensors}")
+            print(f"  - Selected sensors: {len(selected_sensors)} (equally spaced)")
+            print(f"  - Sensor indices: {selected_sensors}")
+            print(f"  - Total observation points: {n_valid}")
+            
+            # Show points per selected sensor
+            for col, n_pts in sensor_point_counts:
+                print(f"    · Sensor {col}: {n_pts} points")
         
-        # Sample from valid points
-        n_valid = min(N_u, len(valid_indices))
-        idx = np.random.choice(valid_indices, n_valid, replace=False)
-        
-        X_u_train = X_star[idx, :]
-        u_train = u_star[idx, :] + np.random.normal(0, u_obs_noise, size=u_star[idx, :].shape)  # Add noise to training data
+        # Common operations for both methods
+        #TODO: add noise to speed, u_train = u_star[idx, :] + noise
+        if u_obs_noise_type is not None and u_obs_noise_level is not None:
+            if u_obs_noise_type == 'Gaussian':
+                noise = u_obs_noise_level * np.std(u_train) * np.random.randn(u_train.shape[0], u_train.shape[1])
+                u_train = u_train + noise
+                print(f"  - Added Gaussian noise with std dev: {u_obs_noise_level * np.std(u_train):.4f}")
+                # recommend u_obs_noise_level between 0.01 to 0.1
+            elif u_obs_noise_type == 'Gumbel':
+                noise = u_obs_noise_level * np.std(u_train) * np.random.gumbel(size=(u_train.shape[0], u_train.shape[1]))
+                u_train = u_train + noise
+                print(f"  - Added Gumbel noise with std dev: {u_obs_noise_level * np.std(u_train):.4f}")
+                # recommend u_obs_noise_level between 0.01 to 0.1
+                # Gumbel noise can simulate extreme events better, the noise level times stddev of u_train, means that higher variability data will have larger noise
+            else:
+                print("  - No noise added to observations")
+        ####
         X_f_train = lb + (ub - lb) * lhs(2, N_f)
         X_f_train = np.vstack((X_f_train, X_u_train))
-        print(f"\nTraining with {n_valid} data points")
+        print(f"\nTraining with {n_valid} data points (+ {N_f} collocation points)")
+        ############################### Training Data #################################
         ############################### Training PINN & NN Models #################################
 
         # PINN Model
@@ -133,24 +214,30 @@ if __name__ == "__main__":
         sa_dict = {
                     'N_u': N_u,
                     'N_f': N_f,
-                    'u_obs_noise': u_obs_noise
+                    'u_obs_noise': u_obs_noise,
+                    'chose_obs_based_on_sensors': chose_obs_based_on_sensors,
+                    'n_sensors': n_sensors,
+                    'u_obs_noise_type': u_obs_noise_type,
+                    'u_obs_noise_level': u_obs_noise_level
                 }
-        
-        plot_results(X_u_train, U_pred, error_u, U_pred2, error_u2, sa_dict)
+
+        plot_results(Exact, x, t, n_valid, 
+                     idx_train, X_u_train, U_pred, U_pred2, error_u, error_u2, sa_dict)
 
         return [error_u, error_u2]
 
-    def plot_results(X_u_train, U_pred, error_u, U_pred2, error_u2, sa_dict):
+    def plot_results(Exact, x, t, n_valid, 
+                     idx_train, X_u_train, U_pred, U_pred2, error_u, error_u2, sa_dict):
         ################################# Plot #################################
         print("\n" + "="*60)
         print("Generating plots...")
         print("="*60)
         
-        fig = plt.figure(figsize=(12, 16))
+        fig = plt.figure(figsize=(12, 20))
 
         ####### Row 0: Ground Truth ##################
         gs0 = gridspec.GridSpec(1, 2)
-        gs0.update(top=0.96, bottom=0.70, left=0.15, right=0.85, wspace=1)
+        gs0.update(top=0.97, bottom=0.77, left=0.15, right=0.85, wspace=1)
 
         ax = plt.subplot(gs0[:, :])
         ax.tick_params(axis='both', which='major', labelsize=16)
@@ -166,9 +253,46 @@ if __name__ == "__main__":
         ax.set_xlabel('Location $x$ (km)', fontsize=18)
         ax.set_title('Ground Truth: A13 Highway Speed (km/h)', fontsize=18)
         
+        ####### Row 1: Observation Data ##################
+        gs_obs = gridspec.GridSpec(1, 2)
+        gs_obs.update(top=0.72, bottom=0.52, left=0.15, right=0.85, wspace=1)
+        
+        ax = plt.subplot(gs_obs[:, :])
+        ax.tick_params(axis='both', which='major', labelsize=16)
+        
+        # Create observation data matrix (only training points visible, rest is white/NaN)
+        Observation = np.full_like(Exact, np.nan)  # Initialize with NaN
+        for i, (x_train, t_train) in enumerate(X_u_train):
+            x_idx = idx_train[i, 1]
+            t_idx = idx_train[i, 0]
+            Observation[t_idx, x_idx] = Exact[t_idx, x_idx]
+        
+        # Create custom colormap with white for NaN values
+        cmap = plt.cm.rainbow_r.copy()
+        cmap.set_bad(color='white')
+        
+        h = ax.imshow(Observation, interpolation='nearest', cmap=cmap,
+                    extent=[x.min(), x.max(), t.min(), t.max()],
+                    origin='lower', aspect='auto')
+        
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes("right", size="5%", pad=0.05)
+        cax.tick_params(labelsize=16)
+        fig.colorbar(h, cax=cax)
+        
+        ax.plot(X_u_train[:, 0], X_u_train[:, 1], 'k.', markersize=1.5, clip_on=False, alpha=0.5)
+        ax.set_ylabel('Time $t$ (15 min)', fontsize=18)
+        ax.set_xlabel('Location $x$ (km)', fontsize=18)
+        if sa_dict['chose_obs_based_on_sensors']:
+            method_str = f"{sa_dict['n_sensors']} sensors"
+            title_str = f'Observation Data (N={n_valid} points from {method_str})'
+        else:
+            title_str = f'Observation Data (N={n_valid} points, Random sampling)'
+        ax.set_title(title_str, fontsize=18)
+
         ####### Row 1: PIDL: u(t,x) ##################
         gs1 = gridspec.GridSpec(1, 2)
-        gs1.update(top=0.60, bottom=0.34, left=0.15, right=0.85, wspace=1)
+        gs1.update(top=0.47, bottom=0.27, left=0.15, right=0.85, wspace=1)
 
         ax = plt.subplot(gs1[:, :])
         ax.tick_params(axis='both', which='major', labelsize=16)
@@ -188,7 +312,7 @@ if __name__ == "__main__":
 
         ####### Row 2: DL: u(t,x) ##################
         gs2 = gridspec.GridSpec(1, 2)
-        gs2.update(top=0.30, bottom=0.0, left=0.15, right=0.85, wspace=1)
+        gs2.update(top=0.22, bottom=0.02, left=0.15, right=0.85, wspace=1)
 
         ax = plt.subplot(gs2[:, :])
         ax.tick_params(axis='both', which='major', labelsize=16)
@@ -208,49 +332,50 @@ if __name__ == "__main__":
         
         if not os.path.exists('figures/sa_figures'):
             os.makedirs('figures/sa_figures')
-        plt.savefig(f"figures/sa_figures/a13_pidl_dl_{sa_dict['N_u']}_{sa_dict['N_f']}_{sa_dict['u_obs_noise']}.pdf")
-        plt.savefig(f"figures/sa_figures/a13_pidl_dl_{sa_dict['N_u']}_{sa_dict['N_f']}_{sa_dict['u_obs_noise']}.eps")
+        plt.savefig(f"figures/sa_figures/{sa_dict['chose_obs_based_on_sensors']}_{sa_dict['N_u']}_{sa_dict['n_sensors']}_{sa_dict['u_obs_noise_type']}_{sa_dict['u_obs_noise_level']}.pdf")
+        plt.savefig(f"figures/sa_figures/{sa_dict['chose_obs_based_on_sensors']}_{sa_dict['N_u']}_{sa_dict['n_sensors']}_{sa_dict['u_obs_noise_type']}_{sa_dict['u_obs_noise_level']}.eps")
         plt.show()
 
-        print(f"\nPlots saved to figures/sa_figures/a13_pidl_dl_{sa_dict['N_u']}_{sa_dict['N_f']}_{sa_dict['u_obs_noise']}.pdf/eps")
+        print(f"\nPlots saved to figures/sa_figures/{sa_dict['chose_obs_based_on_sensors']}_{sa_dict['N_u']}_{sa_dict['n_sensors']}_{sa_dict['u_obs_noise_type']}_{sa_dict['u_obs_noise_level']}.pdf/eps")
         print("="*60)
 
     ########### Sensitivity Analysis Execution ###########
     # init: N_u = 800, N_f = 10000, u_obs_noise = 0.0
-    N_u_lst = [int(0.1 * u_star.shape[0]), int(0.2 * u_star.shape[0]), int(0.3 * u_star.shape[0])]  # 10%, 20%, 30%
-    N_f_lst = [3000, 6000, 10000]  # Example collocation points
-    u_obs_noise_lst = [0.0, 0.05, 0.1, 0.2]  # Example: 0%, 5%, 10%, 20% noise
+    # N_u_lst = [int(0.1 * u_star.shape[0]), int(0.2 * u_star.shape[0]), int(0.3 * u_star.shape[0])]  # 10%, 20%, 30%
+    n_sensors_lst = [5]
+    # n_sensors_lst = [15]
 
-    PINN_error_results = []
-    NN_error_results = []
+    # n_sensors_lst = [3,5,7,10,15]
+    chose_obs_based_on_sensors = True  # Set to True to use sensor-based selection
+    N_f_lst = [10000]  # Example collocation points
+    # N_f_lst = [3000, 6000, 10000]  # Example collocation points
+    u_obs_noise_type = ['Gaussian', 'Gumbel']
+    # u_obs_noise_lst = [0.0]  
+    u_obs_noise_lst = [0.05, 0.1, 0.2]  # Example: 0%, 5%, 10%, 20% noise
 
-    for N_u in tqdm(N_u_lst):
+    PINN_error_results = {}
+    NN_error_results = {}
+
+    for N_sensor in tqdm(n_sensors_lst):
         for N_f in tqdm(N_f_lst):
-            for u_obs_noise in tqdm(u_obs_noise_lst):
-                PINN_error, NN_error = run_once(N_u, N_f, u_obs_noise)
-                PINN_error_results.append(PINN_error)
-                NN_error_results.append(NN_error)
-    
-    print(PINN_error_results)
-    print(NN_error_results)
+            for u_obs_noise_type in u_obs_noise_type:
+                for u_obs_noise in tqdm(u_obs_noise_lst):
+                    combi = (N_sensor, N_f, u_obs_noise_type, u_obs_noise)
+                    print('SA COMBINATION:', combi)
+                    PINN_error, NN_error = run_once(x,t,u_star,
+                                 chose_obs_based_on_sensors=chose_obs_based_on_sensors,
+                                 n_sensors = N_sensor,
+                                 N_u=800,
+                                 N_f=N_f,
+                                 u_obs_noise_type=u_obs_noise_type,
+                                 u_obs_noise_level=u_obs_noise)
+                    PINN_error_results[combi] = PINN_error
+                    NN_error_results[combi] = NN_error
 
-    # Save results to CSV
-    results_df = pd.DataFrame({
-        'N_u': np.repeat(N_u_lst, len(N_f_lst) * len(u_obs_noise_lst)),
-        'N_f': np.tile(np.repeat(N_f_lst, len(u_obs_noise_lst)), len(N_u_lst)),
-        'u_obs_noise': np.tile(u_obs_noise_lst, len(N_u_lst) * len(N_f_lst)),
-        'PINN_error': PINN_error_results,
-        'NN_error': NN_error_results
-    })
+    combi_ary = np.array(list(PINN_error_results.keys()))
+    PINN_ary = np.array(list(PINN_error_results.values()))
+    NN_ary = np.array(list(NN_error_results.values()))
 
-    if not os.path.exists('Results'):
-        os.makedirs('Results')
-    results_df.to_csv('Results/sa_results_a13.csv', index=False)
-    print("\nSensitivity analysis results saved to sa_results_a13.csv")
-
-    PINN_ary = np.array(PINN_error_results)
-    NN_ary = np.array(NN_error_results)
-
-    # SAVE ARRAYS
-    np.save('Results/sa_pinn_errors_a13.npy', PINN_ary)
-    np.save('Results/sa_nn_errors_a13.npy', NN_ary)
+    print(combi_ary)
+    print(PINN_ary)
+    print(NN_ary)
