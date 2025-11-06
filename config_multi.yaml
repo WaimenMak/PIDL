@@ -14,25 +14,25 @@ physics_every: 1
 # Fundamental diagram types to test
 # Options: 'linear', 'log', 'exp', 'power'
 # Note: 'nn' should not be included here - use run_base instead
-fd_name_list: ['log', 'exp', 'power']
+fd_name_list: ['log', 'exp', 'power','triangular']
 
 
 # Optimization
 epochs: 10000
 lr: 0.0001
-log_every: 200
+log_every: 500
 patience: 2000
 seed: 25
 
 # Experiment grid
 num_runs: 5
-# sensor_list: [3,5,7,10,15]
-sensor_list: [5,10]
+sensor_list: [3,5,7,10,15]
+# sensor_list: [5,10]
 # Output directories and files
 base_run_dir: Results_FD/runs/a13_multi
 results_out: Results_FD/summary/a13_multi_results.csv
 summary_out: Results_FD/summary/a13_multi_summary.csv
 
 # Fast mode for smoke tests (reduces epochs and N_f)
-fast: true
+fast: false
   

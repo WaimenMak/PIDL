@@ -8,7 +8,7 @@ distance_json: td_data/2024-09-09.json
 # Model architecture
 layers: [2, 20, 20, 20, 20, 20, 20, 20, 20, 1]
 f_weight: 1.0    # weight for physics loss term
-fd_name: 'exp'
+fd_name: 'log'
 
 # Sampling and training sizes
 N_u: 800        # number of supervised (observation) points to sample when not using sensors
@@ -21,7 +21,7 @@ n_sensors: 5    # used only if sensor_based=true
 # Optimization
 epochs: 10000
 lr: 0.0001
-log_every: 200
+log_every: 500
 physics_every: 1
 patience: 2000
 seed: 25
@@ -30,7 +30,7 @@ seed: 25
 run_base: false  # whether to train baseline NN model (f_weight=0.0) for comparison
 
 # Output
-out_fig_dir: Exp_triangular
+out_fig_dir: FD_log
 
 # Fast mode (for smoke tests)
 fast: false
