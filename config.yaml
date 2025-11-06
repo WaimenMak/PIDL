@@ -8,6 +8,7 @@ distance_json: td_data/2024-09-09.json
 # Model architecture
 layers: [2, 20, 20, 20, 20, 20, 20, 20, 20, 1]
 f_weight: 1.0    # weight for physics loss term
+fd_name: 'log'
 
 # Sampling and training sizes
 N_u: 800        # number of supervised (observation) points to sample when not using sensors
@@ -29,4 +30,4 @@ seed: 25
 out_fig_dir: figures_revised4
 
 # Fast mode (for smoke tests)
-fast: false
+fast: true

@@ -148,7 +148,7 @@ class PhysicsInformedNN(nn.Module):
         
         # Denormalize predictions if labels were normalized
         if self.normalize_labels:
-            u_star = torch.clip(u_star * self.u_std + self.u_mean, min=torch.tensor([0.0]))
+            u_star = torch.clip(u_star * self.u_std + self.u_mean, min=torch.tensor([0.0]).to(self.device))
 
         x_f_star = torch.tensor(X_star[:, 0:1], dtype=torch.float32, requires_grad=True).to(self.device)
         t_f_star = torch.tensor(X_star[:, 1:2], dtype=torch.float32, requires_grad=True).to(self.device)
@@ -261,7 +261,7 @@ class NN(nn.Module):
         
         # Denormalize predictions if labels were normalized
         if self.normalize_labels:
-            u_star = torch.clip(u_star * self.u_std + self.u_mean, min=torch.tensor([0.0]))
+            u_star = torch.clip(u_star * self.u_std + self.u_mean, min=torch.tensor([0.0]).to(self.device))
         
         x_f_star = torch.tensor(X_star[:, 0:1], dtype=torch.float32, requires_grad=True).to(self.device)
         t_f_star = torch.tensor(X_star[:, 1:2], dtype=torch.float32, requires_grad=True).to(self.device)
@@ -551,6 +551,7 @@ if __name__ == "__main__":
     if not os.path.exists('figures'):
         os.makedirs('figures')
     plt.savefig(f'figures/a13_pidl_dl_pytorch_{N_u}.pdf')
+    plt.savefig(f'figures/a13_pidl_dl_pytorch_{N_u}.png')
     plt.savefig(f'figures/a13_pidl_dl_pytorch_{N_u}.eps')
     plt.show()
     

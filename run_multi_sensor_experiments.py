@@ -3,26 +3,41 @@ Run multiple experiments varying the number of sensors and collect results.
 For each sensor count, run multiple independent seeds, train both PINN and NN,
 record per-run metrics, and compute aggregate statistics (mean/std).
 All checkpoints are saved into per-run folders.
+
+How It Works:
+For each sensor count (e.g., 2, 4, 8, 12 sensors)
+
+For each run/seed (e.g., 5 runs per sensor count)
+
+For each fd_name (e.g., 'linear', 'log', 'exp', 'nn'):
+
+Train a model with that FD formulation
+If fd_name == 'nn': train pure neural network (f_weight=0.0)
+Otherwise: train PINN with specified FD (f_weight=1.0)
+Collect predictions and metrics
+Generate plots showing all models side-by-side in one figure
+
+Save results with columns: sensor_count, run_idx, fd_name, model, error_u, etc.
+
+Compute summary statistics grouped by sensor_count, fd_name, and model
 """
 
 from __future__ import annotations
 
 import os
 import time
-import json
 import argparse
+from typing import List, Dict, Any
+
+import numpy as np
+import pandas as pd
 try:
     import yaml
 except ImportError:
     yaml = None
-from dataclasses import asdict
-from typing import List, Dict, Any, Tuple
 
-import numpy as np
-import pandas as pd
-
-# Import helpers and model from the refactored script
-from ojits03_a13_pytorch_revised import (
+# Import utilities from utils module
+from utils import (
     set_seed,
     EarlyStopConfig,
     load_velocity_table,
@@ -32,10 +47,12 @@ from ojits03_a13_pytorch_revised import (
     replace_missing_with_mean,
     select_sensor_columns,
     make_collocation,
-    build_model,
     evaluate_model,
     plot_all,
 )
+
+# Import model from main script
+from ojits03_a13_pytorch_revised import UnifiedPINN, build_model
 
 
 def ensure_dir(path: str) -> None:
@@ -63,10 +80,10 @@ def run_single(
     patience: int,
     base_run_dir: str,
     physics_every: int,
-    f_weight: float,
+    fd_name_list: List[str],
 ) -> List[Dict[str, Any]]:
-    """Run one sensor configuration for one seed, training PINN and NN.
-    Returns a list of per-model result dicts (two rows: pinn and nn).
+    """Run one sensor configuration for one seed, training models for each fd_name.
+    Returns a list of per-model result dicts.
     """
     set_seed(base_seed + run_idx)
 
@@ -91,92 +108,85 @@ def run_single(
     # Collocation
     X_f_train = make_collocation(lb, ub, N_f, X_u_train)
 
-    # Run directories (per model)
+    # Run directory for this sensor count + run
     run_root = os.path.join(base_run_dir, f"NS{sensor_count}", f"run_{run_idx}")
-    pinn_dir = os.path.join(run_root, 'pinn')
-    nn_dir = os.path.join(run_root, 'nn')
-    ensure_dir(pinn_dir)
-    ensure_dir(nn_dir)
+    ensure_dir(run_root)
 
-    # Train PINN
-    model_pinn = build_model(X_u_train, u_train, X_f_train, layers, lb, ub, f_weight=f_weight)
-    start = time.time()
-    out_pinn = model_pinn.fit(
-        epochs=epochs, lr=lr,
-        early_stop=EarlyStopConfig(patience=patience, min_delta=0.0, verbose=True),
-        save_dir=pinn_dir, tag='pinn',
-        log_every=log_every,
-        f_subset_per_epoch=min(4000, X_f_train.shape[0]),
-        physics_every=physics_every, use_mixed_precision=True,
-    )
-    t_pinn = time.time() - start
-    err_pinn, U_pred_pinn, _ = evaluate_model(model_pinn, X_star, u_star, X, T, Exact)
-
-    # Train NN
-    model_nn = build_model(X_u_train, u_train, X_f_train, layers, lb, ub, f_weight=0.0)
-    start = time.time()
-    out_nn = model_nn.fit(
-        epochs=epochs, lr=lr,
-        early_stop=EarlyStopConfig(patience=patience, min_delta=0.0, verbose=True),
-        save_dir=nn_dir, tag='nn',
-        log_every=log_every,
-        f_subset_per_epoch=min(4000, X_f_train.shape[0]),
-        physics_every=physics_every, use_mixed_precision=True,
-    )
-    t_nn = time.time() - start
-    err_nn, U_pred_nn, _ = evaluate_model(model_nn, X_star, u_star, X, T, Exact)
-    
-    plot_all(
-        Exact=Exact, x=x, t=t, X_u_train=X_u_train, idx_train=idx_train,
-        U_pred=U_pred_pinn, error_u=err_pinn, U_pred2=U_pred_nn, error_u2=err_nn,
-        n_valid=n_valid, out_dir=run_root,
-        N_u=0,
-    )
-    
-    # Build result rows
     rows: List[Dict[str, Any]] = []
-    rows.append({
-        'sensor_count': sensor_count,
-        'run_idx': run_idx,
-        'seed': base_seed + run_idx,
-        'model': 'PINN',
-        'f_weight': f_weight,
-        'n_valid': n_valid,
-        'best_epoch': out_pinn['best_epoch'],
-        'best_train': out_pinn['best_train'],
-        'error_u': err_pinn,
-        'train_time_sec': t_pinn,
-        'checkpoint_path': out_pinn['checkpoint_path'],
-        'meta_path': out_pinn['meta_path'],
-        'run_dir': pinn_dir,
-    })
-    rows.append({
-        'sensor_count': sensor_count,
-        'run_idx': run_idx,
-        'seed': base_seed + run_idx,
-        'model': 'NN',
-        'f_weight': 0,
-        'n_valid': n_valid,
-        'best_epoch': out_nn['best_epoch'],
-        'best_train': out_nn['best_train'],
-        'error_u': err_nn,
-        'train_time_sec': t_nn,
-        'checkpoint_path': out_nn['checkpoint_path'],
-        'meta_path': out_nn['meta_path'],
-        'run_dir': nn_dir,
-    })
+    model_predictions: List[Dict[str, Any]] = []
+
+    # Train one model per fd_name
+    for fd_name in fd_name_list:
+        print(f"  Training fd_name={fd_name}...")
+        model_dir = os.path.join(run_root, fd_name)
+        ensure_dir(model_dir)
+
+        # Determine f_weight: if fd_name is 'nn' or 'NN', use 0.0, else 1.0
+        f_weight = 0.0 if fd_name.lower() == 'nn' else 1.0
+        model_type = 'NN' if f_weight == 0.0 else 'PINN'
+
+        model = build_model(X_u_train, u_train, X_f_train, layers, lb, ub, f_weight=f_weight, fd_name=fd_name)
+        start = time.time()
+        out = model.fit(
+            epochs=epochs, lr=lr,
+            early_stop=EarlyStopConfig(patience=patience, min_delta=0.0, verbose=True),
+            save_dir=model_dir, tag=fd_name,
+            log_every=log_every,
+            f_subset_per_epoch=min(4000, X_f_train.shape[0]),
+            physics_every=physics_every, use_mixed_precision=True,
+        )
+        train_time = time.time() - start
+        error_u, U_pred, _ = evaluate_model(model, X_star, u_star, X, T, Exact)
+
+        # Collect for plotting
+        display_name = f"{model_type} ({fd_name})" if model_type == 'PINN' else f"NN ({fd_name})"
+        model_predictions.append({
+            'name': display_name,
+            'U_pred': U_pred,
+            'error': error_u,
+        })
+
+        # Collect results row
+        rows.append({
+            'sensor_count': sensor_count,
+            'run_idx': run_idx,
+            'seed': base_seed + run_idx,
+            'fd_name': fd_name,
+            'model': model_type,
+            'f_weight': f_weight,
+            'n_valid': n_valid,
+            'best_epoch': out['best_epoch'],
+            'best_train': out['best_train'],
+            'error_u': error_u,
+            'train_time_sec': train_time,
+            'checkpoint_path': out['checkpoint_path'],
+            'meta_path': out['meta_path'],
+            'run_dir': model_dir,
+        })
+
+    # Generate plot with all models
+    from utils import plot_multi_models
+    plot_multi_models(
+        Exact=Exact, x=x, t=t, X_u_train=X_u_train, idx_train=idx_train,
+        model_results=model_predictions,
+        n_valid=n_valid, out_dir=run_root,
+        N_u=sensor_count,
+    )
+
     return rows
 
 
 def summarize_results(df: pd.DataFrame) -> pd.DataFrame:
-    # Mean and std over runs per sensor_count and model
-    grouped = df.groupby(['sensor_count', 'model'])
+    """
+    Compute mean and std over runs for each combination of sensor_count, fd_name, and model.
+    """
+    grouped = df.groupby(['sensor_count', 'fd_name', 'model'])
     summary = grouped['error_u'].agg(['mean', 'std']).reset_index()
     summary = summary.rename(columns={'mean': 'error_u_mean', 'std': 'error_u_std'})
     # Optionally include best_train summary, too
     bt = grouped['best_train'].agg(['mean', 'std']).reset_index().rename(
         columns={'mean': 'best_train_mean', 'std': 'best_train_std'})
-    summary = pd.merge(summary, bt, on=['sensor_count', 'model'], how='left')
+    summary = pd.merge(summary, bt, on=['sensor_count', 'fd_name', 'model'], how='left')
     return summary
 
 
@@ -201,16 +211,18 @@ def main():
     patience: int = int(cfg.get('patience', 2000))
     num_runs: int = int(cfg.get('num_runs', 5))
     sensor_list: List[int] = cfg.get('sensor_list', [])
+    fd_name_list: List[str] = cfg.get('fd_name_list', ['linear', 'nn'])
     base_run_dir: str = cfg.get('base_run_dir', 'runs/a13_multi')
     results_out: str = cfg.get('results_out', 'Results/a13_multi_results.csv')
     summary_out: str = cfg.get('summary_out', 'Results/a13_multi_summary.csv')
     seed: int = int(cfg.get('seed', 25))
     fast: bool = bool(cfg.get('fast', False))
     physics_every: int = int(cfg.get('physics_every', 1))
-    f_weight: float = float(cfg.get('f_weight', 1.0))
 
     if not sensor_list:
         raise ValueError("sensor_list must be provided in the multi-experiment config")
+    if not fd_name_list:
+        raise ValueError("fd_name_list must be provided in the multi-experiment config")
 
     # Fast mode reductions
     if fast:
@@ -253,7 +265,7 @@ def main():
                 patience=patience,
                 base_run_dir=base_run_dir,
                 physics_every=physics_every,
-                f_weight = f_weight
+                fd_name_list=fd_name_list,
             )
             all_rows.extend(rows)
 

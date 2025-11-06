@@ -10,7 +10,11 @@ layers: [2, 20, 20, 20, 20, 20, 20, 20, 20, 1]
 # Physics collocation points
 N_f: 10000
 physics_every: 1
-f_weight: 1.0    # weight for physics loss term
+
+# Fundamental diagram types to test
+# Options: 'linear', 'log', 'exp', 'power', 'nn'
+# 'nn' will train a pure neural network (no physics), others train PINNs with different FD formulations
+fd_name_list: ['nn', 'linear', 'log', 'exp', 'power']
 
 # Optimization
 epochs: 10000
@@ -21,13 +25,13 @@ seed: 25
 
 # Experiment grid
 num_runs: 5
-sensor_list: [3,5,7,10,15]
-
+# sensor_list: [3,5,7,10,15]
+sensor_list: [5]
 # Output directories and files
-base_run_dir: Results/runs/a13_multi
-results_out: Results/summary/a13_multi_results.csv
-summary_out: Results/summary/a13_multi_summary.csv
+base_run_dir: Results2/runs/a13_multi
+results_out: Results2/summary/a13_multi_results.csv
+summary_out: Results2/summary/a13_multi_summary.csv
 
 # Fast mode for smoke tests (reduces epochs and N_f)
-fast: false
+fast: true
   

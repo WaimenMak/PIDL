@@ -10,41 +10,32 @@ from __future__ import annotations
 import os
 import json
 import time
-from dataclasses import dataclass
-from datetime import datetime
-from typing import Tuple, List, Dict
+from typing import List
 
 import numpy as np
-import pandas as pd
 import torch
 import torch.nn as nn
-import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
-from mpl_toolkits.axes_grid1 import make_axes_locatable
-from scipy.interpolate import griddata
-from pyDOE import lhs
 try:
     import yaml
 except ImportError:  # lightweight guidance if PyYAML isn't installed
     yaml = None
 
-
-# ----------------------------- Utilities ---------------------------------
-def set_seed(seed: int = 25) -> None:
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-
-
-def timestamp_dir(prefix: str) -> str:
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return f"{prefix}_{ts}"
-
-
-@dataclass
-class EarlyStopConfig:
-    patience: int = 2000
-    min_delta: float = 0.0
-    verbose: bool = True
+# Import utilities from utils module
+from utils import (
+    set_seed,
+    timestamp_dir,
+    EarlyStopConfig,
+    load_velocity_table,
+    load_distances,
+    build_space_time_grid,
+    build_index_grid,
+    replace_missing_with_mean,
+    select_random_points,
+    select_sensor_columns,
+    make_collocation,
+    evaluate_model,
+    plot_all,
+)
 
 class UnifiedPINN(nn.Module):
     """
@@ -63,6 +54,8 @@ class UnifiedPINN(nn.Module):
         V_f: float = 110.0,         # free flow speed (km/h)
         t_scale: float = 0.25,      # time scaling in PDE
         device: str = None,
+        # >>> NEW <<<
+        fd_name: str = "linear",   # 'linear'| 'log' | 'exp' | 'power'
     ):
         super().__init__()
 
@@ -70,6 +63,7 @@ class UnifiedPINN(nn.Module):
         self.f_weight = float(f_weight)
         self.V_f = float(V_f)
         self.t_scale = float(t_scale)
+        self.fd_name = fd_name.lower()
 
         # bounds
         self.lb = torch.tensor(lb, dtype=torch.float32, device=self.device)
@@ -136,21 +130,62 @@ class UnifiedPINN(nn.Module):
 
     def net_u(self, x, t):
         return self.neural_net(torch.cat([x, t], dim=1))
+    
+    # NEW -----
+    def _denorm_u(self, u_norm):
+        # Convert normalized network output to physical units
+        return u_norm * self.u_std + self.u_mean
 
+    def _grad(self, y, x):
+        return torch.autograd.grad(y, x, grad_outputs=torch.ones_like(y),
+                                retain_graph=True, create_graph=True)[0]
+    
     @torch.enable_grad()
     def net_f(self, x, t):
         """
-        Physics residual based on:
-        f = (u_x - 2/V_f * u * u_x - 1/V_f * u_t) * t_scale
+        Physics residual based on the chosen fundamental diagram.
+        For pure NN (fd_name='nn'), returns zeros since no physics is enforced.
         """
-        u = self.net_u(x, t)
-        u_t = torch.autograd.grad(u, t, grad_outputs=torch.ones_like(u), retain_graph=True, create_graph=True)[0]
-        u_x = torch.autograd.grad(u, x, grad_outputs=torch.ones_like(u), retain_graph=True, create_graph=True)[0]
-        f = (u_x - (2.0 / self.V_f) * u * u_x - (1.0 / self.V_f) * u_t) * self.t_scale
-        # If you prefer the textbook residual, you can use:
-        # r = u_t + (self.V_f - 2.0*u) * u_x
-        return f
+        # If this is a pure NN model, return zero residual
+        if self.fd_name.lower() == 'nn' or self.f_weight == 0.0:
+            return torch.zeros_like(x)
+        
+        # network output (normalized) -> physical speed
+        u_norm = self.net_u(x, t)
+        u = self._denorm_u(u_norm)
+                
+        # physical derivatives (autograd applies the scale)
+        u_t = self._grad(u, t)
+        u_x = self._grad(u, x)
+        
+        fd = self.fd_name
+        v_default  = self.V_f
+        if fd == "linear":
+            # Greenshields (speed form): r = u_t + (v_f - 2u) * u_x
+            r = u_t + (v_default - 2.0 * u) * u_x
 
+        elif fd == "log":
+            # Greenberg: r = u_t - (v_m - u) * u_x
+            r = u_t - (v_default - u) * u_x
+
+        elif fd == "exp":
+            # Underwood: r = u_t + u * (ln(v_f/u) - 1) * u_x
+            eps = 1e-6
+            u_safe = torch.clamp(u, min=eps)
+            # keep constants on the right device/dtype for stability
+            v_f_t = torch.tensor(v_default, device=u.device, dtype=u.dtype)
+            r = u_t + u_safe * (torch.log(v_f_t) - torch.log(u_safe) - 1.0) * u_x
+
+        elif fd == "power":
+            # Pipes–Munjal (n): r = u_t + ( (n+1)u - n v_f ) * u_x
+            n = float(self.fd_params.get("n", 3.0))
+            r = u_t + (((n + 1.0) * u) - n * v_default) * u_x
+            
+        else:
+            raise ValueError(f"Unknown fd_name='{self.fd_name}'. "
+                            "Use 'linear' | 'log' | 'exp' | 'power' | 'nn'.")
+
+        return r * self.t_scale
     # ----- training (no validation) -----
     def fit(
         self,
@@ -252,6 +287,7 @@ class UnifiedPINN(nn.Module):
                     "f_weight": self.f_weight,
                     "V_f": self.V_f,
                     "t_scale": self.t_scale,
+                    "fd_name": self.fd_name,
                 }, ckpt_path)
                 # save meta every N epochs
                 if (ep % log_every == 0) or (ep == 1):
@@ -318,228 +354,32 @@ class UnifiedPINN(nn.Module):
             V_f=state.get("V_f", 110.0),
             t_scale=state.get("t_scale", 0.25),
             device=device,
+            fd_name=state.get("fd_name", "linear")
         )
         model.load_state_dict(state["model_state_dict"])
         # Ensure normalization parameters match checkpoint (important if normalize_labels=True)
         model.u_mean = torch.tensor(state["u_mean"], dtype=torch.float32, device=model.device)
         model.u_std  = torch.tensor(state["u_std"], dtype=torch.float32, device=model.device)
         return model
-        
-
-# ----------------------------- Data helpers -------------------------------
-def load_velocity_table(path: str) -> pd.DataFrame:
-    """Load A13 velocity text file, drop header row, return DataFrame."""
-    # Use regex-based separator to avoid FutureWarning from delim_whitespace
-    vel = pd.read_csv(path, sep=r"\s+", engine="python", header=None)
-    vel = vel.iloc[1:]  # drop first non-data row
-    return vel
 
 
-def load_distances(path: str, n_locations_hint: int | None = None) -> np.ndarray:
-    with open(path, 'r') as f:
-        distance = json.load(f)
-    x = np.array(distance['distances']).reshape(-1, 1)
-    if n_locations_hint is not None:
-        x = x[:n_locations_hint]
-    return x
-
-
-def build_space_time_grid(x: np.ndarray, t: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    X, T = np.meshgrid(x, t)
-    X_star = np.hstack((X.flatten()[:, None], T.flatten()[:, None])).astype(np.float32)
-    return X, T, X_star
-
-
-def build_index_grid(Exact: np.ndarray, t: np.ndarray) -> np.ndarray:
-    x_idx = np.arange(Exact.shape[0])
-    idx_flatten, t_idx = np.meshgrid(x_idx, t)
-    return np.hstack((idx_flatten.flatten()[:, None], t_idx.flatten()[:, None]))
-
-
-def replace_missing_with_mean(u_star: np.ndarray) -> Tuple[np.ndarray, int, float]:
-    valid_mask = u_star > 0
-    n_missing = int(np.sum(~valid_mask))
-    if n_missing > 0:
-        u_mean = float(np.mean(u_star[valid_mask]))
-        u_star = u_star.copy()
-        u_star[~valid_mask] = u_mean
-        return u_star, n_missing, u_mean
-    return u_star, 0, float('nan')
-
-
-def select_random_points(X_star: np.ndarray, idx_grid: np.ndarray, u_star: np.ndarray, N_u: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int]:
-    valid_train_mask = u_star.flatten() > 0
-    valid_indices = np.where(valid_train_mask)[0]
-    n_valid = min(N_u, len(valid_indices))
-    idx = np.random.choice(valid_indices, n_valid, replace=False)
-    X_u_train = X_star[idx, :]
-    idx_train = idx_grid[idx, :].astype(int)
-    u_train = u_star[idx, :]
-    return X_u_train, u_train, idx_train, n_valid
-
-
-def select_sensor_columns(u_star: np.ndarray, X_star: np.ndarray, n_locations: int, n_timesteps: int, n_sensors: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int, List[int], List[Tuple[int, int]]]:
-    u_star_matrix = u_star.reshape((n_timesteps, n_locations))
-    n_sensors_to_select = int(min(n_sensors, n_locations))
-    selected_sensors = np.linspace(0, n_locations - 1, n_sensors_to_select, dtype=int)
-    selected_sensors = np.unique(selected_sensors).tolist()
-
-    selected_indices: List[int] = []
-    selected_idx_grid: List[List[int]] = []
-    sensor_point_counts: List[Tuple[int, int]] = []
-
-    for col in selected_sensors:
-        valid_rows = np.where(u_star_matrix[:, col] > 0)[0]
-        sensor_point_counts.append((col, len(valid_rows)))
-        for row in valid_rows:
-            flat_idx = col + row * n_locations
-            selected_indices.append(flat_idx)
-            selected_idx_grid.append([row, col])
-
-    idx = np.array(selected_indices)
-    idx_train = np.array(selected_idx_grid)
-    X_u_train = X_star[idx, :]
-    u_train = u_star[idx, :]
-    n_valid = len(idx)
-    return X_u_train, u_train, idx_train, n_valid, selected_sensors, sensor_point_counts
-
-
-def make_collocation(lb: np.ndarray, ub: np.ndarray, N_f: int, X_u_train: np.ndarray) -> np.ndarray:
-    X_f_train = lb + (ub - lb) * lhs(2, N_f)
-    X_f_train = np.vstack((X_f_train, X_u_train))
-    return X_f_train.astype(np.float32)
-
-
-def build_model(X_u_train: np.ndarray, u_train: np.ndarray, X_f_train: np.ndarray, layers: List[int], lb: np.ndarray, ub: np.ndarray, f_weight: float) -> UnifiedPINN:
+# ----------------------------- Model Builder Helper -------------------------------
+def build_model(
+    X_u_train: np.ndarray, 
+    u_train: np.ndarray, 
+    X_f_train: np.ndarray, 
+    layers: List[int], 
+    lb: np.ndarray, 
+    ub: np.ndarray, 
+    f_weight: float,
+    fd_name: str
+) -> UnifiedPINN:
+    """Convenience function to build a UnifiedPINN model with standard settings."""
     return UnifiedPINN(
         X_u=X_u_train, u=u_train, X_f=X_f_train, layers=layers,
         lb=lb, ub=ub, normalize_labels=True,
-        f_weight=f_weight, V_f=110.0, t_scale=0.25,
+        f_weight=f_weight, V_f=110.0, t_scale=0.25, fd_name=fd_name
     )
-
-
-def evaluate_model(model: UnifiedPINN, X_star: np.ndarray, u_star: np.ndarray, X: np.ndarray, T: np.ndarray, Exact: np.ndarray) -> Tuple[float, np.ndarray, np.ndarray]:
-    u_pred, _ = model.predict(X_star)
-    error_u = float(np.linalg.norm(u_star - u_pred, 2) / np.linalg.norm(u_star, 2))
-    U_pred = griddata(X_star, u_pred.flatten(), (X, T), method='cubic')
-    Error = np.abs(Exact - U_pred)
-    return error_u, U_pred, Error
-
-
-def make_observation_matrix(Exact: np.ndarray, idx_train: np.ndarray) -> np.ndarray:
-    Observation = np.full_like(Exact, np.nan)
-    for i in range(idx_train.shape[0]):
-        x_idx = idx_train[i, 1]
-        t_idx = idx_train[i, 0]
-        Observation[t_idx, x_idx] = Exact[t_idx, x_idx]
-    return Observation
-
-
-def plot_all(
-    Exact: np.ndarray,
-    x: np.ndarray,
-    t: np.ndarray,
-    X_u_train: np.ndarray,
-    idx_train: np.ndarray,
-    U_pred: np.ndarray,
-    error_u: float,
-    U_pred2: np.ndarray,
-    error_u2: float,
-    n_valid: int,
-    out_dir: str,
-    N_u: int,
-) -> None:
-    print("\n" + "=" * 60)
-    print("Generating plots...")
-    print("=" * 60)
-
-    fig = plt.figure(figsize=(12, 20))
-
-    # Row 0: Ground Truth
-    gs0 = gridspec.GridSpec(1, 2)
-    gs0.update(top=0.97, bottom=0.77, left=0.15, right=0.85, wspace=1)
-
-    ax = plt.subplot(gs0[:, :])
-    ax.tick_params(axis='both', which='major', labelsize=16)
-    h = ax.imshow(Exact, interpolation='nearest', cmap='rainbow_r',
-                  extent=[x.min(), x.max(), t.min(), t.max()],
-                  origin='lower', aspect='auto')
-    divider = make_axes_locatable(ax)
-    cax = divider.append_axes("right", size="5%", pad=0.05)
-    cax.tick_params(labelsize=16)
-    fig.colorbar(h, cax=cax)
-    ax.plot(X_u_train[:, 0], X_u_train[:, 1], 'kx', markersize=0.8, clip_on=False)
-    ax.set_ylabel('Time $t$ (15 min)', fontsize=18)
-    ax.set_xlabel('Location $x$ (km)', fontsize=18)
-    ax.set_title('Ground Truth: A13 Highway Speed (km/h)', fontsize=18)
-
-    # Row 1: Observation Data
-    gs_obs = gridspec.GridSpec(1, 2)
-    gs_obs.update(top=0.72, bottom=0.52, left=0.15, right=0.85, wspace=1)
-
-    ax = plt.subplot(gs_obs[:, :])
-    ax.tick_params(axis='both', which='major', labelsize=16)
-    Observation = make_observation_matrix(Exact, idx_train)
-    cmap = plt.cm.rainbow_r.copy()
-    cmap.set_bad(color='white')
-    h = ax.imshow(Observation, interpolation='nearest', cmap=cmap,
-                  extent=[x.min(), x.max(), t.min(), t.max()],
-                  origin='lower', aspect='auto')
-    divider = make_axes_locatable(ax)
-    cax = divider.append_axes("right", size="5%", pad=0.05)
-    cax.tick_params(labelsize=16)
-    fig.colorbar(h, cax=cax)
-    ax.plot(X_u_train[:, 0], X_u_train[:, 1], 'k.', markersize=1.5, clip_on=False, alpha=0.5)
-    ax.set_ylabel('Time $t$ (15 min)', fontsize=18)
-    ax.set_xlabel('Location $x$ (km)', fontsize=18)
-    title_str = f'Observation Data (N={n_valid} points)'
-    ax.set_title(title_str, fontsize=18)
-
-    # Row 2: PINN u(t,x)
-    gs1 = gridspec.GridSpec(1, 2)
-    gs1.update(top=0.47, bottom=0.27, left=0.15, right=0.85, wspace=1)
-    ax = plt.subplot(gs1[:, :])
-    ax.tick_params(axis='both', which='major', labelsize=16)
-    h = ax.imshow(U_pred, interpolation='nearest', cmap='rainbow_r',
-                  extent=[x.min(), x.max(), t.min(), t.max()],
-                  origin='lower', aspect='auto')
-    divider = make_axes_locatable(ax)
-    cax = divider.append_axes("right", size="5%", pad=0.05)
-    cax.tick_params(labelsize=16)
-    fig.colorbar(h, cax=cax)
-    ax.plot(X_u_train[:, 0], X_u_train[:, 1], 'kx', markersize=0.8, clip_on=False)
-    ax.set_ylabel('Time $t$ (15 min)', fontsize=18)
-    ax.set_xlabel('Location $x$ (km)', fontsize=18)
-    ax.set_title(f'PIDL Estimation (Error: {error_u:.4f})', fontsize=18)
-
-    # Row 3: DL u(t,x)
-    gs2 = gridspec.GridSpec(1, 2)
-    gs2.update(top=0.22, bottom=0.02, left=0.15, right=0.85, wspace=1)
-    ax = plt.subplot(gs2[:, :])
-    ax.tick_params(axis='both', which='major', labelsize=16)
-    h = ax.imshow(U_pred2, interpolation='nearest', cmap='rainbow_r',
-                  extent=[x.min(), x.max(), t.min(), t.max()],
-                  origin='lower', aspect='auto')
-    divider = make_axes_locatable(ax)
-    cax = divider.append_axes("right", size="5%", pad=0.05)
-    cax.tick_params(labelsize=16)
-    fig.colorbar(h, cax=cax)
-    ax.plot(X_u_train[:, 0], X_u_train[:, 1], 'kx', markersize=0.8, clip_on=False)
-    ax.set_ylabel('Time $t$ (15 min)', fontsize=18)
-    ax.set_xlabel('Location $x$ (km)', fontsize=18)
-    ax.set_title(f'DL Estimation (Error: {error_u2:.4f})', fontsize=18)
-
-    if out_dir is None:
-        plt.show()
-    else:
-        os.makedirs(out_dir, exist_ok=True)
-        # plt.savefig(f'{out_dir}/a13_pidl_dl_pytorch_{N_u}.pdf')
-        plt.savefig(f'{out_dir}/a13_pidl_dl_pytorch_{N_u}.png')
-        # plt.savefig(f'{out_dir}/a13_pidl_dl_pytorch_{N_u}.eps')
-        plt.show()
-
-    print(f"\nPlots saved to {out_dir}/a13_pidl_dl_pytorch_{N_u}.pdf/eps")
-    print("=" * 60)
 
 
 # ------------------------------ Main flow --------------------------------
@@ -575,6 +415,7 @@ def main():
     out_fig_dir: str = cfg.get('out_fig_dir', 'figures_revised2')
     fast: bool = bool(cfg.get('fast', False))
     f_weight: float = float(cfg.get('f_weight', 1.0))
+    fd_name: str = cfg.get('fd_name', 'linear')
 
     # Reproducibility
     set_seed(seed)
@@ -640,7 +481,7 @@ def main():
     print("\n" + "=" * 60)
     print("Training PINN Model...")
     print("=" * 60)
-    model_pinn = build_model(X_u_train, u_train, X_f_train, layers, lb, ub, f_weight=f_weight)
+    model_pinn = build_model(X_u_train, u_train, X_f_train, layers, lb, ub, f_weight=f_weight, fd_name=fd_name)
     start_time = time.time()
     out_pinn = model_pinn.fit(
         epochs=epochs,
@@ -664,7 +505,7 @@ def main():
     print("\n" + "=" * 60)
     print("Training Regular NN Model...")
     print("=" * 60)
-    model_nn = build_model(X_u_train, u_train, X_f_train, layers, lb, ub, f_weight=0.0)
+    model_nn = build_model(X_u_train, u_train, X_f_train, layers, lb, ub, f_weight=0.0, fd_name=fd_name)
     start_time = time.time()
     out_nn = model_nn.fit(
         epochs=epochs,
@@ -686,7 +527,7 @@ def main():
         Exact=Exact, x=x, t=t, X_u_train=X_u_train, idx_train=idx_train,
         U_pred=U_pred, error_u=error_u, U_pred2=U_pred2, error_u2=error_u2,
         n_valid=n_valid, out_dir=out_fig_dir,
-        N_u=N_u,
+        N_u=N_u, fd_name=fd_name
     )
 
 
