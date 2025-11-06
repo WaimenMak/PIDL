@@ -9,9 +9,15 @@ For each sensor count (e.g., 2, 4, 8, 12 sensors)
 
 For each run/seed (e.g., 5 runs per sensor count)
 
+Check if trained models already exist for this run:
+- If all models for the specified fd_name_list exist: EVAL MODE
+  Load pre-trained models and evaluate them
+- If any model is missing: TRAIN MODE
+  Train all models from scratch
+
 For each fd_name (e.g., 'linear', 'log', 'exp', 'nn'):
 
-Train a model with that FD formulation
+Train or load a model with that FD formulation
 If fd_name == 'nn': train pure neural network (f_weight=0.0)
 Otherwise: train PINN with specified FD (f_weight=1.0)
 Collect predictions and metrics
@@ -20,6 +26,10 @@ Generate plots showing all models side-by-side in one figure
 Save results with columns: sensor_count, run_idx, fd_name, model, error_u, etc.
 
 Compute summary statistics grouped by sensor_count, fd_name, and model
+
+Note: Only models matching the fd_name_list and sensor_list in the config will be
+evaluated when running in eval mode. This allows flexible re-evaluation of specific
+model configurations without retraining.
 """
 
 from __future__ import annotations
@@ -55,8 +65,87 @@ from utils import (
 from ojits03_a13_pytorch_revised import UnifiedPINN, build_model
 
 
+def load_trained_model(
+    model_dir: str,
+    fd_name: str,
+    X_u_train: np.ndarray,
+    u_train: np.ndarray,
+    X_f_train: np.ndarray,
+    layers: List[int],
+    lb: np.ndarray,
+    ub: np.ndarray,
+) -> UnifiedPINN:
+    """Load a previously trained model from checkpoint.
+    
+    Args:
+        model_dir: Directory containing the model checkpoint
+        fd_name: The fd_name tag used for the checkpoint filename
+        X_u_train, u_train, X_f_train, layers, lb, ub: Model building parameters
+    
+    Returns:
+        Loaded UnifiedPINN model
+    """
+    import torch
+    import json
+    
+    ckpt_path = os.path.join(model_dir, f"model_{fd_name}.pt")
+    meta_path = os.path.join(model_dir, f"model_{fd_name}_meta.json")
+    
+    # Load metadata to get f_weight
+    with open(meta_path, 'r') as f:
+        meta = json.load(f)
+    
+    f_weight = meta.get('f_weight', 1.0)
+    
+    # Build model architecture
+    model = build_model(X_u_train, u_train, X_f_train, layers, lb, ub, f_weight=f_weight, fd_name=fd_name)
+    
+    # Load checkpoint
+    state = torch.load(ckpt_path, map_location=model.device)
+    model.load_state_dict(state["model_state_dict"])
+    model.eval()
+    
+    return model
+
+
 def ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
+
+
+def check_model_exists(model_dir: str, fd_name: str) -> bool:
+    """Check if a trained model already exists in the model directory.
+    
+    Args:
+        model_dir: Directory where the model checkpoint should be saved
+        fd_name: The fd_name tag used for the checkpoint filename
+    
+    Returns:
+        True if both checkpoint (.pt) and meta (.json) files exist, False otherwise
+    """
+    ckpt_path = os.path.join(model_dir, f"model_{fd_name}.pt")
+    meta_path = os.path.join(model_dir, f"model_{fd_name}_meta.json")
+    return os.path.isfile(ckpt_path) and os.path.isfile(meta_path)
+
+
+def check_all_models_exist(run_root: str, fd_name_list: List[str]) -> bool:
+    """Check if all models for the given fd_name_list exist in the run directory.
+    
+    Args:
+        run_root: Root directory for this run (e.g., 'runs/a13_multi/NS5/run_1')
+        fd_name_list: List of fd_names to check for
+    
+    Returns:
+        True if all models exist, False if any are missing
+    """
+    if not os.path.isdir(run_root):
+        return False
+    
+    for fd_name in fd_name_list:
+        model_dir = os.path.join(run_root, fd_name)
+        if not check_model_exists(model_dir, fd_name):
+            return False
+    
+    return True
 
 
 def parse_args() -> argparse.Namespace:
@@ -112,12 +201,19 @@ def run_single(
     run_root = os.path.join(base_run_dir, f"NS{sensor_count}", f"run_{run_idx}")
     ensure_dir(run_root)
 
+    # Check if all models already exist for this run
+    eval_mode = check_all_models_exist(run_root, fd_name_list)
+    
+    if eval_mode:
+        print(f"  [EVAL MODE] All models found in {run_root}. Loading and evaluating...")
+    else:
+        print(f"  [TRAIN MODE] Training models...")
+
     rows: List[Dict[str, Any]] = []
     model_predictions: List[Dict[str, Any]] = []
 
-    # Train one model per fd_name
+    # Train or evaluate one model per fd_name
     for fd_name in fd_name_list:
-        print(f"  Training fd_name={fd_name}...")
         model_dir = os.path.join(run_root, fd_name)
         ensure_dir(model_dir)
 
@@ -125,18 +221,47 @@ def run_single(
         f_weight = 0.0 if fd_name.lower() == 'nn' else 1.0
         model_type = 'NN' if f_weight == 0.0 else 'PINN'
 
-        model = build_model(X_u_train, u_train, X_f_train, layers, lb, ub, f_weight=f_weight, fd_name=fd_name)
-        start = time.time()
-        out = model.fit(
-            epochs=epochs, lr=lr,
-            early_stop=EarlyStopConfig(patience=patience, min_delta=0.0, verbose=True),
-            save_dir=model_dir, tag=fd_name,
-            log_every=log_every,
-            f_subset_per_epoch=min(4000, X_f_train.shape[0]),
-            physics_every=physics_every, use_mixed_precision=True,
-        )
-        train_time = time.time() - start
-        error_u, U_pred, _ = evaluate_model(model, X_star, u_star, X, T, Exact)
+        if eval_mode and check_model_exists(model_dir, fd_name):
+            # Load existing model and evaluate
+            print(f"  Loading existing model: fd_name={fd_name}...")
+            model = load_trained_model(
+                model_dir, fd_name, X_u_train, u_train, X_f_train,
+                layers, lb, ub
+            )
+            train_time = 0.0  # No training time for loaded models
+            error_u, U_pred, _ = evaluate_model(model, X_star, u_star, X, T, Exact)
+            
+            # Get checkpoint paths
+            ckpt_path = os.path.join(model_dir, f"model_{fd_name}.pt")
+            meta_path = os.path.join(model_dir, f"model_{fd_name}_meta.json")
+            
+            # Load metadata for best_epoch and best_train info
+            import json
+            with open(meta_path, 'r') as f:
+                meta = json.load(f)
+            best_epoch = meta.get('best_epoch', -1)
+            best_train = meta.get('best_train', -1.0)
+            
+        else:
+            # Train new model
+            print(f"  Training fd_name={fd_name}...")
+            model = build_model(X_u_train, u_train, X_f_train, layers, lb, ub, f_weight=f_weight, fd_name=fd_name)
+            start = time.time()
+            out = model.fit(
+                epochs=epochs, lr=lr,
+                early_stop=EarlyStopConfig(patience=patience, min_delta=0.0, verbose=True),
+                save_dir=model_dir, tag=fd_name,
+                log_every=log_every,
+                f_subset_per_epoch=min(4000, X_f_train.shape[0]),
+                physics_every=physics_every, use_mixed_precision=True,
+            )
+            train_time = time.time() - start
+            error_u, U_pred, _ = evaluate_model(model, X_star, u_star, X, T, Exact)
+            
+            best_epoch = out['best_epoch']
+            best_train = out['best_train']
+            ckpt_path = out['checkpoint_path']
+            meta_path = out['meta_path']
 
         # Collect for plotting
         display_name = f"{model_type} ({fd_name})" if model_type == 'PINN' else f"NN ({fd_name})"
@@ -155,12 +280,12 @@ def run_single(
             'model': model_type,
             'f_weight': f_weight,
             'n_valid': n_valid,
-            'best_epoch': out['best_epoch'],
-            'best_train': out['best_train'],
+            'best_epoch': best_epoch,
+            'best_train': best_train,
             'error_u': error_u,
             'train_time_sec': train_time,
-            'checkpoint_path': out['checkpoint_path'],
-            'meta_path': out['meta_path'],
+            'checkpoint_path': ckpt_path,
+            'meta_path': meta_path,
             'run_dir': model_dir,
         })
 
