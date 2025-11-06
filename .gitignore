@@ -1,8 +1,16 @@
 /data/lwr_matlab
-/figures
 .idea
 __pycache__
 .specstory
 .cursorindexingignore
 .cursorignore
 .DS_Store
+*.ipynb
+*.png
+*.jpg
+*.jpeg
+*.pdf
+*.eps
+*.csv
+*.json
+*.pt

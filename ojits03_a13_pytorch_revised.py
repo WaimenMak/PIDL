@@ -35,6 +35,7 @@ from utils import (
     make_collocation,
     evaluate_model,
     plot_all,
+    plot_multi_models,
 )
 
 class UnifiedPINN(nn.Module):
@@ -55,7 +56,7 @@ class UnifiedPINN(nn.Module):
         t_scale: float = 0.25,      # time scaling in PDE
         device: str = None,
         # >>> NEW <<<
-        fd_name: str = "linear",   # 'linear'| 'log' | 'exp' | 'power'
+        fd_name: str = "linear",   # 'linear'| 'log' | 'exp' | 'power' | 'triangular' | 'nn'
     ):
         super().__init__()
 
@@ -178,12 +179,35 @@ class UnifiedPINN(nn.Module):
 
         elif fd == "power":
             # Pipes–Munjal (n): r = u_t + ( (n+1)u - n v_f ) * u_x
-            n = float(self.fd_params.get("n", 3.0))
+            n = 3 # random guess shape of the drop toward congestion.
             r = u_t + (((n + 1.0) * u) - n * v_default) * u_x
             
+        elif fd == "triangular":
+            # Parameters:
+            # v_f: free-flow plateau speed (km/h)
+            # w  : backward wave speed magnitude in congestion (km/h, positive)
+            # alpha: gate sharpness (dimensionless, ~10-50)
+            v_f  = v_default
+            w    = 15.0
+            alpha= 20.0
+
+            # Smooth gate: on (≈1) when u << v_f; off (≈0) when u ~ v_f
+            # s(u) = sigmoid(alpha * (v_f - u))
+            s = torch.sigmoid(torch.tensor(alpha, device=u.device, dtype=u.dtype) * (v_f - u))
+
+            # Branch residuals
+            r_cong = u_t - w * u_x   # congestion PDE: constant backward wave speed
+            r_free = u - v_f         # free-flow plateau
+
+            # Blended residual
+            r = s * r_cong + (1.0 - s) * r_free
+
+            # (Optional) soft cap to discourage u > v_f if desired:
+            # cap_penalty = torch.clamp(u - v_f, min=0.0)
+            # r = r + 0.0 * cap_penalty  # add small weight if you need it
         else:
             raise ValueError(f"Unknown fd_name='{self.fd_name}'. "
-                            "Use 'linear' | 'log' | 'exp' | 'power' | 'nn'.")
+                            "Use 'linear' | 'log' | 'exp' | 'power' | 'triangular' | 'nn' .")
 
         return r * self.t_scale
     # ----- training (no validation) -----
@@ -416,6 +440,7 @@ def main():
     fast: bool = bool(cfg.get('fast', False))
     f_weight: float = float(cfg.get('f_weight', 1.0))
     fd_name: str = cfg.get('fd_name', 'linear')
+    run_base: bool = bool(cfg.get('run_base', True))
 
     # Reproducibility
     set_seed(seed)
@@ -488,7 +513,7 @@ def main():
         lr=lr,
         early_stop=EarlyStopConfig(patience=patience, min_delta=0.0, verbose=True),
         save_dir=pinn_dir,
-        tag="unifiedpinn_pinn_v1",
+        tag=f"pinn_{fd_name}",
         log_every=log_every,
         f_subset_per_epoch=min(4000, X_f_train.shape[0]),
         physics_every=physics_every,
@@ -500,37 +525,69 @@ def main():
     error_u, U_pred, _ = evaluate_model(model_pinn, X_star, u_star, X, T, Exact)
     print(f'PINN Error u: {error_u:.4e}')
 
-    # Train pure NN
-    nn_dir = f"./runs/a13_exp1/" + timestamp_dir("nn")
-    print("\n" + "=" * 60)
-    print("Training Regular NN Model...")
-    print("=" * 60)
-    model_nn = build_model(X_u_train, u_train, X_f_train, layers, lb, ub, f_weight=0.0, fd_name=fd_name)
-    start_time = time.time()
-    out_nn = model_nn.fit(
-        epochs=epochs,
-        lr=lr,
-        early_stop=EarlyStopConfig(patience=patience, min_delta=0.0, verbose=True),
-        save_dir=nn_dir,
-        tag="unifiedpinn_nn_v1",
-        log_every=log_every,
-        use_mixed_precision=True,
-    )
-    elapsed = time.time() - start_time
-    print(f"Training finished after {out_nn['best_epoch']} epochs with best train loss {out_nn['best_train']:.4e}")
-    print(f'Training time: {elapsed:.4f} seconds')
-    error_u2, U_pred2, _ = evaluate_model(model_nn, X_star, u_star, X, T, Exact)
-    print(f'DL Error u: {error_u2:.4e}')
+    # Collect model predictions for plotting
+    model_predictions = []
+    model_predictions.append({
+        'name': f'PINN ({fd_name})',
+        'U_pred': U_pred,
+        'error': error_u,
+    })
 
-    # Plot
-    plot_all(
-        Exact=Exact, x=x, t=t, X_u_train=X_u_train, idx_train=idx_train,
-        U_pred=U_pred, error_u=error_u, U_pred2=U_pred2, error_u2=error_u2,
-        n_valid=n_valid, out_dir=out_fig_dir,
-        N_u=N_u, fd_name=fd_name
-    )
+    # Train pure NN (baseline) - optional based on run_base config
+    if run_base:
+        nn_dir = f"./runs/a13_exp1/" + timestamp_dir("nn")
+        print("\n" + "=" * 60)
+        print("Training Regular NN Model...")
+        print("=" * 60)
+        model_nn = build_model(X_u_train, u_train, X_f_train, layers, lb, ub, f_weight=0.0, fd_name='nn')
+        start_time = time.time()
+        out_nn = model_nn.fit(
+            epochs=epochs,
+            lr=lr,
+            early_stop=EarlyStopConfig(patience=patience, min_delta=0.0, verbose=True),
+            save_dir=nn_dir,
+            tag="nn",
+            log_every=log_every,
+            use_mixed_precision=True,
+        )
+        elapsed = time.time() - start_time
+        print(f"Training finished after {out_nn['best_epoch']} epochs with best train loss {out_nn['best_train']:.4e}")
+        print(f'Training time: {elapsed:.4f} seconds')
+        error_u2, U_pred2, _ = evaluate_model(model_nn, X_star, u_star, X, T, Exact)
+        print(f'DL Error u: {error_u2:.4e}')
+
+        # Add baseline NN to predictions
+        model_predictions.append({
+            'name': 'NN (baseline)',
+            'U_pred': U_pred2,
+            'error': error_u2,
+        })
+    else:
+        print("\n" + "=" * 60)
+        print("Skipping baseline NN training (run_base=False)")
+        print("=" * 60)
+
+    # Plot using multi-model plotting function
+    if len(model_predictions) == 2:
+        # Use classic plot_all for backward compatibility when we have PINN + NN
+        plot_all(
+            Exact=Exact, x=x, t=t, X_u_train=X_u_train, idx_train=idx_train,
+            U_pred=model_predictions[0]['U_pred'], error_u=model_predictions[0]['error'],
+            U_pred2=model_predictions[1]['U_pred'], error_u2=model_predictions[1]['error'],
+            n_valid=n_valid, out_dir=out_fig_dir,
+            N_u=N_u,
+        )
+    else:
+        # Use plot_multi_models for single model or multiple models
+        plot_multi_models(
+            Exact=Exact, x=x, t=t, X_u_train=X_u_train, idx_train=idx_train,
+            model_results=model_predictions,
+            n_valid=n_valid, out_dir=out_fig_dir,
+            N_u=N_u,
+        )
 
 
 if __name__ == "__main__":
     main()
+
 

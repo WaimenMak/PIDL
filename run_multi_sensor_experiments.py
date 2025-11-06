@@ -48,7 +48,7 @@ from utils import (
     select_sensor_columns,
     make_collocation,
     evaluate_model,
-    plot_all,
+    plot_multi_models,
 )
 
 # Import model from main script
@@ -164,8 +164,6 @@ def run_single(
             'run_dir': model_dir,
         })
 
-    # Generate plot with all models
-    from utils import plot_multi_models
     plot_multi_models(
         Exact=Exact, x=x, t=t, X_u_train=X_u_train, idx_train=idx_train,
         model_results=model_predictions,
