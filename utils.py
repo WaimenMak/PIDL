@@ -313,107 +313,68 @@ def plot_multi_models(
     N_u: int,
 ) -> None:
     """
-    Generate comprehensive visualization with flexible number of model rows.
-    
-    Args:
-        Exact: Ground truth velocity field
-        x: Spatial coordinates
-        t: Time coordinates
-        X_u_train: Training point coordinates
-        idx_train: Training point indices
-        model_results: List of dicts with keys 'name' (model name), 'U_pred' (prediction), 'error' (L2 error)
-        n_valid: Number of valid training points
-        out_dir: Output directory for plots
-        N_u: Number of training points (for filename)
+    Generate comparison plots with clean spacing using constrained_layout.
+
+    Rows: Ground Truth, Observations, and one row per model in model_results.
     """
     print("\n" + "=" * 60)
     print("Generating multi-model comparison plots...")
     print("=" * 60)
-    
+
     n_models = len(model_results)
-    # Total rows: ground truth + observation + N models
-    n_rows = 2 + n_models
-    
-    # Calculate figure height based on number of rows (each row ~5 inches)
-    fig_height = n_rows * 5
-    fig = plt.figure(figsize=(12, fig_height))
-    
-    # Row spacing calculation
-    row_height = 1.0 / n_rows
-    spacing = 0.02
-    
-    # Row 0: Ground Truth
-    gs0 = gridspec.GridSpec(1, 2)
-    top_pos = 1.0 - spacing
-    bottom_pos = top_pos - (row_height - 2*spacing)
-    gs0.update(top=top_pos, bottom=bottom_pos, left=0.15, right=0.85, wspace=1)
-    
-    ax = plt.subplot(gs0[:, :])
-    ax.tick_params(axis='both', which='major', labelsize=16)
-    h = ax.imshow(Exact, interpolation='nearest', cmap='rainbow_r',
-                  extent=[x.min(), x.max(), t.min(), t.max()],
-                  origin='lower', aspect='auto')
-    divider = make_axes_locatable(ax)
-    cax = divider.append_axes("right", size="5%", pad=0.05)
-    cax.tick_params(labelsize=16)
-    fig.colorbar(h, cax=cax)
-    ax.plot(X_u_train[:, 0], X_u_train[:, 1], 'kx', markersize=0.8, clip_on=False)
-    ax.set_ylabel('Time $t$ (15 min)', fontsize=18)
-    ax.set_xlabel('Location $x$ (km)', fontsize=18)
-    ax.set_title('Ground Truth: A13 Highway Speed (km/h)', fontsize=18)
-    
-    # Row 1: Observation Data
-    gs_obs = gridspec.GridSpec(1, 2)
-    top_pos = bottom_pos - spacing
-    bottom_pos = top_pos - (row_height - 2*spacing)
-    gs_obs.update(top=top_pos, bottom=bottom_pos, left=0.15, right=0.85, wspace=1)
-    
-    ax = plt.subplot(gs_obs[:, :])
-    ax.tick_params(axis='both', which='major', labelsize=16)
+    n_rows = 2 + n_models  # GT + Obs + models
+
+    # Use constrained_layout to avoid overlapping titles/labels/colorbars
+    fig_height = max(4.5 * n_rows, 10)
+    fig, axes = plt.subplots(n_rows, 1, figsize=(12, fig_height), constrained_layout=True)
+    if n_rows == 1:
+        axes = [axes]
+
+    def add_panel(ax, data, title, cmap_name='rainbow_r', show_points=True, obs=False):
+        if obs:
+            cmap = plt.cm.get_cmap(cmap_name).copy()
+            cmap.set_bad(color='white')
+        else:
+            cmap = plt.cm.get_cmap(cmap_name)
+        im = ax.imshow(
+            data, interpolation='nearest', cmap=cmap,
+            extent=[x.min(), x.max(), t.min(), t.max()],
+            origin='lower', aspect='auto'
+        )
+        ax.tick_params(axis='both', which='major', labelsize=14)
+        if show_points:
+            mk = 1.5 if obs else 0.8
+            ax.plot(X_u_train[:, 0], X_u_train[:, 1], 'k.' if obs else 'kx', markersize=mk, alpha=0.6, clip_on=False)
+        ax.set_ylabel('Time $t$ (15 min)', fontsize=15)
+        ax.set_xlabel('Location $x$ (km)', fontsize=15, labelpad=6)
+        ax.set_title(title, fontsize=16, pad=10)
+        cbar = fig.colorbar(im, ax=ax)
+        cbar.ax.tick_params(labelsize=12)
+
+    # Row 0: Ground truth
+    add_panel(axes[0], Exact, 'Ground Truth: A13 Highway Speed (km/h)')
+
+    # Row 1: Observations
     Observation = make_observation_matrix(Exact, idx_train)
-    cmap = plt.cm.rainbow_r.copy()
-    cmap.set_bad(color='white')
-    h = ax.imshow(Observation, interpolation='nearest', cmap=cmap,
-                  extent=[x.min(), x.max(), t.min(), t.max()],
-                  origin='lower', aspect='auto')
-    divider = make_axes_locatable(ax)
-    cax = divider.append_axes("right", size="5%", pad=0.05)
-    cax.tick_params(labelsize=16)
-    fig.colorbar(h, cax=cax)
-    ax.plot(X_u_train[:, 0], X_u_train[:, 1], 'k.', markersize=1.5, clip_on=False, alpha=0.5)
-    ax.set_ylabel('Time $t$ (15 min)', fontsize=18)
-    ax.set_xlabel('Location $x$ (km)', fontsize=18)
-    title_str = f'Observation Data (N={n_valid} points)'
-    ax.set_title(title_str, fontsize=18)
-    
-    # Rows 2+: Model predictions
-    for i, model_result in enumerate(model_results):
-        gs_model = gridspec.GridSpec(1, 2)
-        top_pos = bottom_pos - spacing
-        bottom_pos = top_pos - (row_height - 2*spacing)
-        gs_model.update(top=top_pos, bottom=bottom_pos, left=0.15, right=0.85, wspace=1)
-        
-        ax = plt.subplot(gs_model[:, :])
-        ax.tick_params(axis='both', which='major', labelsize=16)
-        h = ax.imshow(model_result['U_pred'], interpolation='nearest', cmap='rainbow_r',
-                      extent=[x.min(), x.max(), t.min(), t.max()],
-                      origin='lower', aspect='auto')
-        divider = make_axes_locatable(ax)
-        cax = divider.append_axes("right", size="5%", pad=0.05)
-        cax.tick_params(labelsize=16)
-        fig.colorbar(h, cax=cax)
-        ax.plot(X_u_train[:, 0], X_u_train[:, 1], 'kx', markersize=0.8, clip_on=False)
-        ax.set_ylabel('Time $t$ (15 min)', fontsize=18)
-        ax.set_xlabel('Location $x$ (km)', fontsize=18)
-        ax.set_title(f"{model_result['name']} (Error: {model_result['error']:.4f})", fontsize=18)
-    
+    add_panel(
+        axes[1], Observation, f'Observation Data (N={n_valid} points)',
+        cmap_name='rainbow_r', show_points=True, obs=True
+    )
+
+    # Rows 2+: Models
+    for i, m in enumerate(model_results):
+        add_panel(
+            axes[2 + i], m['U_pred'], f"{m['name']} (Error: {m['error']:.4f})",
+            cmap_name='rainbow_r', show_points=True, obs=False
+        )
+
     if out_dir is not None:
         os.makedirs(out_dir, exist_ok=True)
-        plt.savefig(f'{out_dir}/a13_multi_model_{N_u}.png', bbox_inches='tight', dpi=150)
+        plt.savefig(f'{out_dir}/a13_multi_model_{N_u}.png', dpi=150)
         plt.show()
     else:
         plt.show()
-    
+
     print(f"\nPlots saved to {out_dir}/a13_multi_model_{N_u}.png")
     print("=" * 60)
 

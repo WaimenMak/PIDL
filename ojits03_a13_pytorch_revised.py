@@ -59,7 +59,7 @@ class UnifiedPINN(nn.Module):
         fd_name: str = "linear",   # 'linear'| 'log' | 'exp' | 'power' | 'triangular' | 'nn'
     ):
         super().__init__()
-
+        print(f"Initializing PINN with fd_name='{fd_name}', f_weight={f_weight}")
         self.device = torch.device(device if device is not None else ('cuda' if torch.cuda.is_available() else 'cpu'))
         self.f_weight = float(f_weight)
         self.V_f = float(V_f)
@@ -141,6 +141,20 @@ class UnifiedPINN(nn.Module):
         return torch.autograd.grad(y, x, grad_outputs=torch.ones_like(y),
                                 retain_graph=True, create_graph=True)[0]
     
+    # @torch.enable_grad()
+    # def net_f(self, x, t):
+    #     """
+    #     Physics residual based on:
+    #     f = (u_x - 2/V_f * u * u_x - 1/V_f * u_t) * t_scale
+    #     """
+    #     u = self.net_u(x, t)
+    #     u_t = torch.autograd.grad(u, t, grad_outputs=torch.ones_like(u), retain_graph=True, create_graph=True)[0]
+    #     u_x = torch.autograd.grad(u, x, grad_outputs=torch.ones_like(u), retain_graph=True, create_graph=True)[0]
+    #     f = (u_x - (2.0 / self.V_f) * u * u_x - (1.0 / self.V_f) * u_t) * self.t_scale
+    #     # If you prefer the textbook residual, you can use:
+    #     # r = u_t + (self.V_f - 2.0*u) * u_x
+    #     return f
+    
     @torch.enable_grad()
     def net_f(self, x, t):
         """
@@ -161,55 +175,58 @@ class UnifiedPINN(nn.Module):
         
         fd = self.fd_name
         v_default  = self.V_f
+        
         if fd == "linear":
-            # Greenshields (speed form): r = u_t + (v_f - 2u) * u_x
-            r = u_t + (v_default - 2.0 * u) * u_x
+            # Greenshields: r = u_t + (v_f - 2u) u_x
+            v_f = v_default
+            # Non-dimensional form: (1/v_f) u_t + (1 - 2u/v_f) u_x = 0
+            r_nd = (u_t / v_f) + (1.0 - 2.0 * (u / v_f)) * u_x
 
         elif fd == "log":
-            # Greenberg: r = u_t - (v_m - u) * u_x
-            r = u_t - (v_default - u) * u_x
+            # Greenberg: r = u_t - (v_m - u) u_x
+            v_m = v_default
+            # Non-dimensional: (1/v_m) u_t + (u/v_m - 1) u_x = 0
+            r_nd = (u_t / v_m) + ((u / v_m) - 1.0) * u_x
 
         elif fd == "exp":
-            # Underwood: r = u_t + u * (ln(v_f/u) - 1) * u_x
+            # Underwood: r = u_t + u (ln(v_f/u) - 1) u_x
+            v_f = v_default
             eps = 1e-6
             u_safe = torch.clamp(u, min=eps)
-            # keep constants on the right device/dtype for stability
-            v_f_t = torch.tensor(v_default, device=u.device, dtype=u.dtype)
-            r = u_t + u_safe * (torch.log(v_f_t) - torch.log(u_safe) - 1.0) * u_x
+            # Non-dimensional: (1/v_f) u_t + (u/v_f) (ln(v_f/u) - 1) u_x = 0
+            r_nd = (u_t / v_f) + ( (u_safe / v_f) * (torch.log(torch.tensor(v_f, device=u.device, dtype=u.dtype)) - torch.log(u_safe) - 1.0) ) * u_x
 
         elif fd == "power":
-            # Pipes–Munjal (n): r = u_t + ( (n+1)u - n v_f ) * u_x
-            n = 3 # random guess shape of the drop toward congestion.
-            r = u_t + (((n + 1.0) * u) - n * v_default) * u_x
-            
-        elif fd == "triangular":
-            # Parameters:
-            # v_f: free-flow plateau speed (km/h)
-            # w  : backward wave speed magnitude in congestion (km/h, positive)
-            # alpha: gate sharpness (dimensionless, ~10-50)
-            v_f  = v_default
-            w    = 15.0
-            alpha= 20.0
+            # Pipes–Munjal: r = u_t + ( (n+1)u - n v_f ) u_x
+            v_f = v_default
+            n   = 3.0 # guess?
+            # Non-dimensional: (1/v_f) u_t + ( (n+1) u/v_f - n ) u_x = 0
+            r_nd = (u_t / v_f) + ( ((n + 1.0) * (u / v_f)) - n ) * u_x
 
-            # Smooth gate: on (≈1) when u << v_f; off (≈0) when u ~ v_f
-            # s(u) = sigmoid(alpha * (v_f - u))
+        elif fd == "triangular":
+            # Speed-gated blend:
+            #   r = s * (u_t - w u_x) + (1-s) * (u - v_f)
+            # Normalize branches:
+            #   Congestion: (1/w) u_t - u_x
+            #   Free-flow : (u - v_f)/v_f
+            v_f  = v_default
+            w    = 15.0 # km/h (positive magnitude)
+            alpha= 20.0 # gate sharpness
+
             s = torch.sigmoid(torch.tensor(alpha, device=u.device, dtype=u.dtype) * (v_f - u))
 
-            # Branch residuals
-            r_cong = u_t - w * u_x   # congestion PDE: constant backward wave speed
-            r_free = u - v_f         # free-flow plateau
+            r_cong_nd = (u_t / w) - u_x        # non-dimensional congestion PDE
+            r_free_nd = (u - v_f) / v_f        # non-dimensional free-flow constraint
 
-            # Blended residual
-            r = s * r_cong + (1.0 - s) * r_free
+            r_nd = s * r_cong_nd + (1.0 - s) * r_free_nd
 
-            # (Optional) soft cap to discourage u > v_f if desired:
-            # cap_penalty = torch.clamp(u - v_f, min=0.0)
-            # r = r + 0.0 * cap_penalty  # add small weight if you need it
+            # Optional: tiny extra penalty if you want to discourage u > v_f
+            # r_nd = r_nd + 0.05 * torch.clamp((u - v_f) / v_f, min=0.0)
+
         else:
-            raise ValueError(f"Unknown fd_name='{self.fd_name}'. "
-                            "Use 'linear' | 'log' | 'exp' | 'power' | 'triangular' | 'nn' .")
+            raise ValueError(f"Unknown fd_name='{self.fd_name}'")
 
-        return r * self.t_scale
+        return r_nd * self.t_scale
     # ----- training (no validation) -----
     def fit(
         self,
