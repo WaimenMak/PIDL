@@ -14,7 +14,7 @@ physics_every: 1
 # Fundamental diagram types to test
 # Options: 'linear', 'log', 'exp', 'power'
 # Note: 'nn' should not be included here - use run_base instead
-fd_name_list: ['log', 'exp', 'power','triangular']
+fd_name_list: ['linear']
 
 
 # Optimization
