@@ -47,7 +47,7 @@ except ImportError:
     yaml = None
 
 # Import utilities from utils module
-from utils import (
+from utils.utils import (
     set_seed,
     EarlyStopConfig,
     load_velocity_table,

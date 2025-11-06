@@ -21,7 +21,7 @@ except ImportError:  # lightweight guidance if PyYAML isn't installed
     yaml = None
 
 # Import utilities from utils module
-from utils import (
+from utils.utils import (
     set_seed,
     timestamp_dir,
     EarlyStopConfig,
