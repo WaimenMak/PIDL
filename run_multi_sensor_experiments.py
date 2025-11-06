@@ -150,7 +150,7 @@ def check_all_models_exist(run_root: str, fd_name_list: List[str]) -> bool:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Multi-run experiments over sensor counts (config-driven)")
-    p.add_argument('--config', type=str, default='config_multi.yaml', help='Path to multi-experiment YAML config')
+    p.add_argument('--config', type=str, default='configs/config_multi.yaml', help='Path to multi-experiment YAML config')
     return p.parse_args()
 
 

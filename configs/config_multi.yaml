@@ -12,9 +12,9 @@ N_f: 10000
 physics_every: 1
 
 # Fundamental diagram types to test
-# Options: 'linear', 'log', 'exp', 'power'
+# Options: 'linear', 'log', 'exp', 'power','triangular'
 # Note: 'nn' should not be included here - use run_base instead
-fd_name_list: ['linear']
+fd_name_list: ['linear', 'log', 'exp', 'power', 'triangular']
 
 
 # Optimization
@@ -26,7 +26,7 @@ seed: 25
 
 # Experiment grid
 num_runs: 5
-sensor_list: [3,5,7,10,15]
+sensor_list: [3,5,7,10]
 # sensor_list: [5,10]
 # Output directories and files
 base_run_dir: Results_FD/runs/a13_multi

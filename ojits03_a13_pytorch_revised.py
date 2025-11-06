@@ -428,7 +428,7 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="UnifiedPINN for A13 velocity reconstruction (config-driven)")
-    parser.add_argument('--config', type=str, default='config.yaml', help='Path to YAML configuration file')
+    parser.add_argument('--config', type=str, default='configs/config.yaml', help='Path to YAML configuration file')
     args = parser.parse_args()
 
     # Load configuration
