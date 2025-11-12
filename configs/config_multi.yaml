@@ -12,10 +12,11 @@ N_f: 10000
 physics_every: 1
 
 # Fundamental diagram types to test
-# Options: 'linear', 'log', 'exp', 'power','triangular'
-# Note: 'nn' should not be included here - use run_base instead
-fd_name_list: ['linear', 'log', 'exp', 'power', 'triangular']
-
+# Options: 'linear', 'log', 'exp', 'power', 'triangular', 'nn'
+# Note: Use 'nn' to include a baseline neural network (f_weight=0.0, no physics)
+# fd_name_list: ['linear', 'log', 'exp', 'power', 'triangular']
+# To include baseline NN: fd_name_list: ['linear', 'log', 'exp', 'power', 'triangular', 'nn']
+fd_name_list: ['nn', 'linear']
 
 # Optimization
 epochs: 10000
@@ -24,15 +25,23 @@ log_every: 500
 patience: 2000
 seed: 25
 
+# Two-stage optimization (ADAM then L-BFGS)
+use_lbfgs: true        # Enable L-BFGS refinement after ADAM
+lbfgs_epochs: null      # Number of L-BFGS epochs (null = epochs//100)
+
+# Output visualization
+plot_loss_history: true   # Whether to plot and save training loss history
+loss_plot_log_scale: true # Use log scale for loss plots
+
 # Experiment grid
 num_runs: 5
 sensor_list: [3,5,7,10]
 # sensor_list: [5,10]
 # Output directories and files
-base_run_dir: Results_FD/runs/a13_multi
-results_out: Results_FD/summary/a13_multi_results.csv
-summary_out: Results_FD/summary/a13_multi_summary.csv
+base_run_dir: Results_FD2/runs/a13_multi
+results_out: Results_FD2/summary/a13_multi_results.csv
+summary_out: Results_FD2/summary/a13_multi_summary.csv
 
 # Fast mode for smoke tests (reduces epochs and N_f)
-fast: false
+fast: true
   

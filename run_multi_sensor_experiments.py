@@ -59,6 +59,7 @@ from utils.utils import (
     make_collocation,
     evaluate_model,
     plot_multi_models,
+    plot_training_history,
 )
 
 # Import model from main script
@@ -170,6 +171,10 @@ def run_single(
     base_run_dir: str,
     physics_every: int,
     fd_name_list: List[str],
+    use_lbfgs: bool = False,
+    lbfgs_epochs: int | None = None,
+    plot_loss_history_flag: bool = True,
+    loss_plot_log_scale: bool = True,
 ) -> List[Dict[str, Any]]:
     """Run one sensor configuration for one seed, training models for each fd_name.
     Returns a list of per-model result dicts.
@@ -242,6 +247,9 @@ def run_single(
             best_epoch = meta.get('best_epoch', -1)
             best_train = meta.get('best_train', -1.0)
             
+            # Get history for plotting if available
+            history = meta.get('history', {"epoch": [], "train_total": [], "data_loss": [], "phys_loss": []})
+            
         else:
             # Train new model
             print(f"  Training fd_name={fd_name}...")
@@ -254,6 +262,8 @@ def run_single(
                 log_every=log_every,
                 f_subset_per_epoch=min(4000, X_f_train.shape[0]),
                 physics_every=physics_every, use_mixed_precision=True,
+                use_lbfgs=use_lbfgs,
+                lbfgs_epochs=lbfgs_epochs,
             )
             train_time = time.time() - start
             error_u, U_pred, _ = evaluate_model(model, X_star, u_star, X, T, Exact)
@@ -262,6 +272,17 @@ def run_single(
             best_train = out['best_train']
             ckpt_path = out['checkpoint_path']
             meta_path = out['meta_path']
+            history = out['history']
+        
+        # Plot training history
+        if plot_loss_history_flag and history['epoch']:
+            plot_training_history(
+                history=history,
+                out_dir=run_root,
+                tag=fd_name,
+                show_physics=(f_weight > 0.0),
+                log_scale=loss_plot_log_scale,
+            )
 
         # Collect for plotting
         display_name = f"{model_type} ({fd_name})" if model_type == 'PINN' else f"NN ({fd_name})"
@@ -341,6 +362,12 @@ def main():
     seed: int = int(cfg.get('seed', 25))
     fast: bool = bool(cfg.get('fast', False))
     physics_every: int = int(cfg.get('physics_every', 1))
+    # Two-stage optimization parameters
+    use_lbfgs: bool = bool(cfg.get('use_lbfgs', False))
+    lbfgs_epochs: int | None = cfg.get('lbfgs_epochs', None)
+    # Plotting parameters
+    plot_loss_history_flag: bool = bool(cfg.get('plot_loss_history', True))
+    loss_plot_log_scale: bool = bool(cfg.get('loss_plot_log_scale', True))
 
     if not sensor_list:
         raise ValueError("sensor_list must be provided in the multi-experiment config")
@@ -389,6 +416,10 @@ def main():
                 base_run_dir=base_run_dir,
                 physics_every=physics_every,
                 fd_name_list=fd_name_list,
+                use_lbfgs=use_lbfgs,
+                lbfgs_epochs=lbfgs_epochs,
+                plot_loss_history_flag=plot_loss_history_flag,
+                loss_plot_log_scale=loss_plot_log_scale,
             )
             all_rows.extend(rows)
 

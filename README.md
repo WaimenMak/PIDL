@@ -159,6 +159,14 @@ Use `run_multi_sensor_experiments.py` with `configs/config_multi.yaml` to automa
 - `patience: 2000`
 - `seed: 25`
 
+**Two-stage optimization:**
+- `use_lbfgs: false` – enable L-BFGS refinement after ADAM
+- `lbfgs_epochs: null` – L-BFGS epochs (null = epochs//100)
+
+**Visualization:**
+- `plot_loss_history: true` – save training loss history plots
+- `loss_plot_log_scale: true` – use log scale for loss plots
+
 **Experiment grid:**
 - `num_runs: 5` – independent runs per configuration
 - `sensor_list: [3, 5, 7, 10]` – sensor counts to test
@@ -178,13 +186,15 @@ python run_multi_sensor_experiments.py --config configs/config_multi.yaml
 ```
 
 3) Outputs:
-- Per-run folders: `Results_FD/runs/a13_multi/NS{n}/run_{i}/{fd_name}/`
-  - Contains model checkpoints and metadata
+- Per-run folders: `Results_FD/runs/a13_multi/NS{n}/run_{i}/`
+  - `model_{fd_name}.pt` – model checkpoints for each FD type
+  - `model_{fd_name}_meta.json` – training metadata and history
+  - `loss_history_{fd_name}.png` – training loss plots (if enabled)
+  - `a13_multi_model_{sensor_count}.png` – multi-model comparison plot
 - Results CSV: per-run metrics (sensor_count, run_idx, fd_name, model, error_u, etc.)
 - Summary CSV: mean/std statistics per (sensor_count, fd_name, model)
-- Plots: multi-model comparisons for each sensor configuration
 
-**Eval mode:** If trained models already exist in the result directories, the script automatically runs in evaluation mode—loading and evaluating existing models instead of retraining. Only models matching the `fd_name_list` and `sensor_list` in the config are evaluated.
+**Eval mode:** If trained models already exist in the result directories, the script automatically runs in evaluation mode—loading and evaluating existing models instead of retraining. Only models matching the `fd_name_list` and `sensor_list` in the config are evaluated. Loss plots are regenerated from saved history in evaluation mode.
 
 ## Tips
 
