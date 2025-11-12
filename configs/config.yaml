@@ -10,6 +10,12 @@ layers: [2, 20, 20, 20, 20, 20, 20, 20, 20, 1]
 f_weight: 1.0    # weight for physics loss term
 fd_name: 'linear'  # finite difference scheme for spatial derivatives ('linear' or 'quadratic')
 
+# Speed limit configuration
+use_inferred_speed_limits: true  # If true, infer location-based speed limits from data; if false, use default V_f
+V_f: 100.0                        # Default free-flow speed (km/h) - used when use_inferred_speed_limits=false
+speed_limit_percentile: 95        # Percentile for inferring speed limits (when use_inferred_speed_limits=true)
+valid_speed_limits: [80, 100]    # Allowed discrete speed limits (km/h) for assignment
+
 # Sampling and training sizes
 N_u: 800        # number of supervised (observation) points to sample when not using sensors
 N_f: 10000      # number of collocation (physics) points
@@ -34,7 +40,7 @@ lbfgs_epochs: 400      # Number of L-BFGS epochs (null = epochs//100)
 run_base: false  # whether to train baseline NN model (f_weight=0.0) for comparison
 
 # Output
-out_fig_dir: FD_Sobol_5day_5s_10knf_lbfgs
+out_fig_dir: FD_Sobol_5day_5s_10knf_lbfgs_2speed_prop
 plot_loss_history: true   # Whether to plot and save training loss history
 loss_plot_log_scale: true # Use log scale for loss plots
 

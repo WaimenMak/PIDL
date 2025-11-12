@@ -495,3 +495,52 @@ def plot_training_history(
     
     print("=" * 60)
 
+
+import numpy as np
+import pandas as pd
+
+def infer_speed_limits(U: np.ndarray, x: np.ndarray,
+                       valid_limits=(80, 100),
+                       perc=95) -> pd.DataFrame:
+    """
+    Infer per-location free-flow speed limit from a speed matrix.
+
+    Parameters
+    ----------
+    U : array (Nt, Nx)
+        Speed matrix (km/h). Each column is one location.
+    x : array (Nx,) or (Nx,1)
+        Location coordinates (e.g., km markers).
+    valid_limits : tuple
+        Allowed discrete speed limits.
+    perc : int
+        Percentile to use for the free-flow estimate.
+
+    Returns
+    -------
+    pd.DataFrame with columns ['x', 'v_free_est', 'limit_assigned'].
+    """
+
+    x = np.squeeze(x)
+    n_loc = U.shape[1]
+    v_est = []
+    v_assign = []
+
+    for j in range(n_loc):
+        u_col = np.asarray(U[:, j], dtype=float)
+        u_col = u_col[np.isfinite(u_col) & (u_col > 0)]
+        if len(u_col) == 0:
+            v_est.append(np.nan)
+            v_assign.append(np.nan)
+            continue
+        v_p = np.percentile(u_col, perc)
+        v_est.append(v_p)
+        # choose closest allowed limit
+        v_assign.append(min(valid_limits, key=lambda v: abs(v_p - v)))
+
+    df = pd.DataFrame({
+        "x": x,
+        f"v{perc}_est": v_est,
+        "limit_assigned": v_assign
+    })
+    return df

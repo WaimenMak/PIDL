@@ -7,6 +7,12 @@ distance_json: td_data/2024-09-09.json
 # Model architecture
 layers: [2, 20, 20, 20, 20, 20, 20, 20, 20, 1]
 
+# Speed limit configuration
+use_inferred_speed_limits: true  # If true, infer location-based speed limits from data; if false, use default V_f
+V_f: 100.0                        # Default free-flow speed (km/h) - used when use_inferred_speed_limits=false
+speed_limit_percentile: 95        # Percentile for inferring speed limits (when use_inferred_speed_limits=true)
+valid_speed_limits: [80, 100]    # Allowed discrete speed limits (km/h) for assignment
+
 # Physics collocation points
 N_f: 10000
 physics_every: 1
@@ -16,7 +22,7 @@ physics_every: 1
 # Note: Use 'nn' to include a baseline neural network (f_weight=0.0, no physics)
 # fd_name_list: ['linear', 'log', 'exp', 'power', 'triangular']
 # To include baseline NN: fd_name_list: ['linear', 'log', 'exp', 'power', 'triangular', 'nn']
-fd_name_list: ['nn', 'linear']
+fd_name_list: ['linear']
 
 # Optimization
 epochs: 10000
@@ -27,21 +33,21 @@ seed: 25
 
 # Two-stage optimization (ADAM then L-BFGS)
 use_lbfgs: true        # Enable L-BFGS refinement after ADAM
-lbfgs_epochs: null      # Number of L-BFGS epochs (null = epochs//100)
+lbfgs_epochs: 300      # Number of L-BFGS epochs (null = epochs//100)
 
 # Output visualization
 plot_loss_history: true   # Whether to plot and save training loss history
 loss_plot_log_scale: true # Use log scale for loss plots
 
 # Experiment grid
-num_runs: 5
-sensor_list: [3,5,7,10]
-# sensor_list: [5,10]
+num_runs: 3
+# sensor_list: [3,5,7,10]
+sensor_list: [5]
 # Output directories and files
-base_run_dir: Results_FD2/runs/a13_multi
-results_out: Results_FD2/summary/a13_multi_results.csv
-summary_out: Results_FD2/summary/a13_multi_summary.csv
+base_run_dir: Results_multi_speed/runs/a13_multi
+results_out: Results_multi_speed/summary/a13_multi_results.csv
+summary_out: Results_multi_speed/summary/a13_multi_summary.csv
 
 # Fast mode for smoke tests (reduces epochs and N_f)
-fast: true
+fast: false
   

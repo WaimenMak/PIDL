@@ -49,6 +49,7 @@ except ImportError:
 # Import utilities from utils module
 from utils.utils import (
     set_seed,
+    infer_speed_limits,
     EarlyStopConfig,
     load_velocity_table,
     load_distances,
@@ -75,6 +76,7 @@ def load_trained_model(
     layers: List[int],
     lb: np.ndarray,
     ub: np.ndarray,
+    speed_limits_df: pd.DataFrame = None,
 ) -> UnifiedPINN:
     """Load a previously trained model from checkpoint.
     
@@ -82,6 +84,7 @@ def load_trained_model(
         model_dir: Directory containing the model checkpoint
         fd_name: The fd_name tag used for the checkpoint filename
         X_u_train, u_train, X_f_train, layers, lb, ub: Model building parameters
+        speed_limits_df: Optional DataFrame with location-based speed limits
     
     Returns:
         Loaded UnifiedPINN model
@@ -98,8 +101,8 @@ def load_trained_model(
     
     f_weight = meta.get('f_weight', 1.0)
     
-    # Build model architecture
-    model = build_model(X_u_train, u_train, X_f_train, layers, lb, ub, f_weight=f_weight, fd_name=fd_name)
+    # Build model architecture with speed limits
+    model = build_model(X_u_train, u_train, X_f_train, layers, lb, ub, f_weight=f_weight, fd_name=fd_name, speed_limits_df=speed_limits_df)
     
     # Load checkpoint
     state = torch.load(ckpt_path, map_location=model.device)
@@ -171,7 +174,11 @@ def run_single(
     base_run_dir: str,
     physics_every: int,
     fd_name_list: List[str],
-    use_lbfgs: bool = False,
+    use_inferred_speed_limits: bool = True,
+    V_f: float = 110.0,
+    speed_limit_percentile: int = 95,
+    valid_speed_limits: tuple = (80, 100),
+    use_lbfgs: bool = True,
     lbfgs_epochs: int | None = None,
     plot_loss_history_flag: bool = True,
     loss_plot_log_scale: bool = True,
@@ -187,6 +194,18 @@ def run_single(
     idx_grid = build_index_grid(Exact, t)
     u_star = Exact.flatten()[:, None]
     u_star, n_missing, u_mean = replace_missing_with_mean(u_star)
+    
+    # Conditionally infer free-flow speed limits per location based on config
+    if use_inferred_speed_limits:
+        df_free_flow = infer_speed_limits(
+            Exact, x, 
+            valid_limits=valid_speed_limits, 
+            perc=speed_limit_percentile
+        )
+        print(f"  Using inferred speed limits ({speed_limit_percentile}th percentile, range: {df_free_flow['limit_assigned'].min():.1f}-{df_free_flow['limit_assigned'].max():.1f} km/h)")
+    else:
+        df_free_flow = None
+        print(f"  Using default constant free-flow speed: {V_f:.1f} km/h")
 
     lb = X_star.min(0).astype(np.float32)
     ub = X_star.max(0).astype(np.float32)
@@ -231,7 +250,7 @@ def run_single(
             print(f"  Loading existing model: fd_name={fd_name}...")
             model = load_trained_model(
                 model_dir, fd_name, X_u_train, u_train, X_f_train,
-                layers, lb, ub
+                layers, lb, ub, speed_limits_df=df_free_flow
             )
             train_time = 0.0  # No training time for loaded models
             error_u, U_pred, _ = evaluate_model(model, X_star, u_star, X, T, Exact)
@@ -253,7 +272,7 @@ def run_single(
         else:
             # Train new model
             print(f"  Training fd_name={fd_name}...")
-            model = build_model(X_u_train, u_train, X_f_train, layers, lb, ub, f_weight=f_weight, fd_name=fd_name)
+            model = build_model(X_u_train, u_train, X_f_train, layers, lb, ub, f_weight=f_weight, fd_name=fd_name, speed_limits_df=df_free_flow)
             start = time.time()
             out = model.fit(
                 epochs=epochs, lr=lr,
@@ -362,8 +381,13 @@ def main():
     seed: int = int(cfg.get('seed', 25))
     fast: bool = bool(cfg.get('fast', False))
     physics_every: int = int(cfg.get('physics_every', 1))
+    # Speed limit parameters
+    use_inferred_speed_limits: bool = bool(cfg.get('use_inferred_speed_limits', True))
+    V_f: float = float(cfg.get('V_f', 110.0))
+    speed_limit_percentile: int = int(cfg.get('speed_limit_percentile', 95))
+    valid_speed_limits: tuple = tuple(cfg.get('valid_speed_limits', [80, 100]))
     # Two-stage optimization parameters
-    use_lbfgs: bool = bool(cfg.get('use_lbfgs', False))
+    use_lbfgs: bool = bool(cfg.get('use_lbfgs', True))
     lbfgs_epochs: int | None = cfg.get('lbfgs_epochs', None)
     # Plotting parameters
     plot_loss_history_flag: bool = bool(cfg.get('plot_loss_history', True))
@@ -416,6 +440,10 @@ def main():
                 base_run_dir=base_run_dir,
                 physics_every=physics_every,
                 fd_name_list=fd_name_list,
+                use_inferred_speed_limits=use_inferred_speed_limits,
+                V_f=V_f,
+                speed_limit_percentile=speed_limit_percentile,
+                valid_speed_limits=valid_speed_limits,
                 use_lbfgs=use_lbfgs,
                 lbfgs_epochs=lbfgs_epochs,
                 plot_loss_history_flag=plot_loss_history_flag,

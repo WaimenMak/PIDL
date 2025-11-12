@@ -13,6 +13,7 @@ import time
 from typing import List
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 try:
@@ -23,6 +24,7 @@ except ImportError:  # lightweight guidance if PyYAML isn't installed
 # Import utilities from utils module
 from utils.utils import (
     set_seed,
+    infer_speed_limits,
     timestamp_dir,
     EarlyStopConfig,
     load_velocity_table,
@@ -53,11 +55,12 @@ class UnifiedPINN(nn.Module):
         lb, ub,           # 2-dim lower/upper bounds (for input normalization)
         normalize_labels: bool = True,
         f_weight: float = 1.0,      # 0.0 => pure NN, >0.0 => PINN
-        V_f: float = 110.0,         # free flow speed (km/h)
+        V_f: float = 110.0,         # free flow speed (km/h) - used as default if speed_limits_df not provided
         t_scale: float = 0.25,      # time scaling in PDE
         device: str = None,
         # >>> NEW <<<
         fd_name: str = "linear",   # 'linear'| 'log' | 'exp' | 'power' | 'triangular' | 'nn'
+        speed_limits_df: pd.DataFrame = None,  # DataFrame with columns ['x', 'limit_assigned'] for location-based speeds
     ):
         super().__init__()
         print(f"Initializing PINN with fd_name='{fd_name}', f_weight={f_weight}")
@@ -108,13 +111,23 @@ class UnifiedPINN(nn.Module):
         self.layers = layers
         self.model = self._initialize_NN(layers).to(self.device)
         
-        # >>> NEW: speed limit breakpoint and values <<<
-        self.speed_break_km = 16.2
-        self.vf_left  = 100.0          # km/h for x < 16.2
-        self.vf_right = 80.0           # km/h for x >= 16.2
-        # For Greenberg you can use the same numbers for v_m unless you want different ones
-        self.vm_left  = self.vf_left
-        self.vm_right = self.vf_right
+        # >>> Speed limit handling <<<
+        if speed_limits_df is not None:
+            # Convert dataframe to numpy arrays and create interpolation lookup
+            x_locs = speed_limits_df['x'].values.astype(np.float32)
+            v_limits = speed_limits_df['limit_assigned'].values.astype(np.float32)
+            
+            # Store as tensors for GPU-friendly lookup
+            self.x_speed_locs = torch.tensor(x_locs, dtype=torch.float32, device=self.device)
+            self.v_speed_limits = torch.tensor(v_limits, dtype=torch.float32, device=self.device)
+            self.use_location_speeds = True
+            print(f"[Speed Limits] Using location-based free-flow speeds from {len(x_locs)} locations")
+            print(f"  Range: {v_limits.min():.1f} - {v_limits.max():.1f} km/h")
+        else:
+            # Use default constant speed
+            self.use_location_speeds = False
+            self.default_speed = float(V_f)
+            print(f"[Speed Limits] Using constant free-flow speed: {V_f:.1f} km/h")
 
     # ----- architecture -----
     def _initialize_NN(self, layers):
@@ -149,89 +162,90 @@ class UnifiedPINN(nn.Module):
     def _grad(self, y, x):
         return torch.autograd.grad(y, x, grad_outputs=torch.ones_like(y),
                                 retain_graph=True, create_graph=True)[0]
-    
-    # @torch.enable_grad()
-    # def net_f(self, x, t):
-    #     """
-    #     Physics residual based on:
-    #     f = (u_x - 2/V_f * u * u_x - 1/V_f * u_t) * t_scale
-    #     """
-    #     u = self.net_u(x, t)
-    #     u_t = torch.autograd.grad(u, t, grad_outputs=torch.ones_like(u), retain_graph=True, create_graph=True)[0]
-    #     u_x = torch.autograd.grad(u, x, grad_outputs=torch.ones_like(u), retain_graph=True, create_graph=True)[0]
-    #     f = (u_x - (2.0 / self.V_f) * u * u_x - (1.0 / self.V_f) * u_t) * self.t_scale
-    #     # If you prefer the textbook residual, you can use:
-    #     # r = u_t + (self.V_f - 2.0*u) * u_x
-    #     return f
-    
+        
+        
+    def _get_free_flow_speed(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Get free-flow speed v_f(x) for given locations.
+        
+        Uses location-based speed limits if available (from speed_limits_df),
+        otherwise returns constant default speed.
+        
+        Args:
+            x: Tensor of shape (N, 1) with location coordinates
+            
+        Returns:
+            Tensor of shape (N, 1) with free-flow speeds at each location
+        """
+        if not self.use_location_speeds:
+            # Return constant speed
+            return torch.full_like(x, self.default_speed)
+        
+        # Interpolate speed based on nearest location
+        # For each x, find closest location in x_speed_locs and use its limit
+        x_expanded = x.expand(-1, len(self.x_speed_locs))  # (N, num_locs)
+        locs_expanded = self.x_speed_locs.unsqueeze(0).expand(x.shape[0], -1)  # (N, num_locs)
+        
+        # Find nearest location for each point
+        distances = torch.abs(x_expanded - locs_expanded)
+        nearest_idx = torch.argmin(distances, dim=1)  # (N,)
+        
+        # Lookup speed limit at nearest location
+        v_f = self.v_speed_limits[nearest_idx].unsqueeze(1)  # (N, 1)
+        
+        return v_f
+
     @torch.enable_grad()
     def net_f(self, x, t):
-        """
-        Physics residual based on the chosen fundamental diagram.
-        For pure NN (fd_name='nn'), returns zeros since no physics is enforced.
-        """
-        # If this is a pure NN model, return zero residual
-        if self.fd_name.lower() == 'nn' or self.f_weight == 0.0:
+        # no physics
+        if self.fd_name == 'nn' or self.f_weight == 0.0:
             return torch.zeros_like(x)
-        
-        # network output (normalized) -> physical speed
+
+        # physical speed and its derivatives
         u_norm = self.net_u(x, t)
         u = self._denorm_u(u_norm)
-                
-        # physical derivatives (autograd applies the scale)
         u_t = self._grad(u, t)
         u_x = self._grad(u, x)
-        
+
+        # Get free-flow speed for all locations
+        v_f = self._get_free_flow_speed(x)
+
         fd = self.fd_name
-        v_default  = self.V_f
-        
+
         if fd == "linear":
-            # Greenshields: r = u_t + (v_f - 2u) u_x
-            v_f = v_default
-            # Non-dimensional form: (1/v_f) u_t + (1 - 2u/v_f) u_x = 0
+            # Greenshields: r_nd = (1/v_f) u_t + (1 - 2u/v_f) u_x
             r_nd = (u_t / v_f) + (1.0 - 2.0 * (u / v_f)) * u_x
 
         elif fd == "log":
-            # Greenberg: r = u_t - (v_m - u) u_x
-            v_m = v_default
-            # Non-dimensional: (1/v_m) u_t + (u/v_m - 1) u_x = 0
-            r_nd = (u_t / v_m) + ((u / v_m) - 1.0) * u_x
+            # Greenberg: r_nd = (1/v_f) u_t + (u/v_f - 1) u_x
+            # Note: Using v_f for consistency (previously used separate v_m)
+            r_nd = (u_t / v_f) + ((u / v_f) - 1.0) * u_x
 
         elif fd == "exp":
-            # Underwood: r = u_t + u (ln(v_f/u) - 1) u_x
-            v_f = v_default
+            # Underwood: r_nd = (1/v_f) u_t + (u/v_f)(ln(v_f/u) - 1) u_x
             eps = 1e-6
             u_safe = torch.clamp(u, min=eps)
-            # Non-dimensional: (1/v_f) u_t + (u/v_f) (ln(v_f/u) - 1) u_x = 0
-            r_nd = (u_t / v_f) + ( (u_safe / v_f) * (torch.log(torch.tensor(v_f, device=u.device, dtype=u.dtype)) - torch.log(u_safe) - 1.0) ) * u_x
+            r_nd = (u_t / v_f) + ( (u_safe / v_f) * (torch.log(v_f) - torch.log(u_safe) - 1.0) ) * u_x
 
         elif fd == "power":
-            # Pipes–Munjal: r = u_t + ( (n+1)u - n v_f ) u_x
-            v_f = v_default
-            n   = 3.0 # guess?
-            # Non-dimensional: (1/v_f) u_t + ( (n+1) u/v_f - n ) u_x = 0
-            r_nd = (u_t / v_f) + ( ((n + 1.0) * (u / v_f)) - n ) * u_x
+            # Pipes–Munjal: r_nd = (1/v_f) u_t + ((n+1)u/v_f - n) u_x
+            n = 3.0
+            r_nd = (u_t / v_f) + (((n + 1.0) * (u / v_f)) - n) * u_x
 
         elif fd == "triangular":
-            # Speed-gated blend:
-            #   r = s * (u_t - w u_x) + (1-s) * (u - v_f)
-            # Normalize branches:
-            #   Congestion: (1/w) u_t - u_x
-            #   Free-flow : (u - v_f)/v_f
-            v_f  = v_default
-            w    = 15.0 # km/h (positive magnitude)
-            alpha= 20.0 # gate sharpness
-
+            # r_nd = s(u)*( (1/w)u_t - u_x ) + (1-s(u)) * (u - v_f)/v_f
+            w = 15.0
+            alpha = 20.0
             s = torch.sigmoid(torch.tensor(alpha, device=u.device, dtype=u.dtype) * (v_f - u))
-
-            r_cong_nd = (u_t / w) - u_x        # non-dimensional congestion PDE
-            r_free_nd = (u - v_f) / v_f        # non-dimensional free-flow constraint
-
+            r_cong_nd = (u_t / w) - u_x
+            r_free_nd = (u - v_f) / v_f
             r_nd = s * r_cong_nd + (1.0 - s) * r_free_nd
+
         else:
             raise ValueError(f"Unknown fd_name='{self.fd_name}'")
 
         return r_nd * self.t_scale
+    
     # ----- training (no validation) -----
     def fit(
         self,
@@ -478,6 +492,16 @@ class UnifiedPINN(nn.Module):
             
             print(f"\nL-BFGS refinement complete. Best loss: {lbfgs_best_loss:.4e}")
 
+        # Save final meta file with complete history (including L-BFGS if used)
+        with open(meta_path, "w") as f:
+            json.dump({
+                "best_train": best_train,
+                "best_epoch": best_epoch,
+                "epochs_run": history["epoch"][-1] if history["epoch"] else 0,
+                "history": history,
+            }, f, indent=2)
+        print(f"Saved final training metadata to: {meta_path}")
+
         return {
             "best_train": best_train,
             "best_epoch": best_epoch,
@@ -503,9 +527,15 @@ class UnifiedPINN(nn.Module):
 
     # ----- utility -----
     @staticmethod
-    def load_from_checkpoint(ckpt_path: str, X_u, u, X_f, device: str = None):
+    def load_from_checkpoint(ckpt_path: str, X_u, u, X_f, device: str = None, speed_limits_df: pd.DataFrame = None):
         """
         Convenience loader: rebuilds model and loads weights, while allowing new datasets.
+        
+        Args:
+            ckpt_path: Path to checkpoint file
+            X_u, u, X_f: Training data (used for model structure, not for training)
+            device: Device to load model on
+            speed_limits_df: Optional DataFrame with location-based speed limits
         """
         state = torch.load(ckpt_path, map_location=device if device else ('cuda' if torch.cuda.is_available() else 'cpu'))
         model = UnifiedPINN(
@@ -518,7 +548,8 @@ class UnifiedPINN(nn.Module):
             V_f=state.get("V_f", 110.0),
             t_scale=state.get("t_scale", 0.25),
             device=device,
-            fd_name=state.get("fd_name", "linear")
+            fd_name=state.get("fd_name", "linear"),
+            speed_limits_df=speed_limits_df
         )
         model.load_state_dict(state["model_state_dict"])
         # Ensure normalization parameters match checkpoint (important if normalize_labels=True)
@@ -536,13 +567,15 @@ def build_model(
     lb: np.ndarray, 
     ub: np.ndarray, 
     f_weight: float,
-    fd_name: str
+    fd_name: str,
+    speed_limits_df: pd.DataFrame = None
 ) -> UnifiedPINN:
     """Convenience function to build a UnifiedPINN model with standard settings."""
     return UnifiedPINN(
         X_u=X_u_train, u=u_train, X_f=X_f_train, layers=layers,
         lb=lb, ub=ub, normalize_labels=True,
-        f_weight=f_weight, V_f=110.0, t_scale=0.25, fd_name=fd_name
+        f_weight=f_weight, V_f=110.0, t_scale=0.25, fd_name=fd_name,
+        speed_limits_df=speed_limits_df
     )
 
 
@@ -581,8 +614,13 @@ def main():
     f_weight: float = float(cfg.get('f_weight', 1.0))
     fd_name: str = cfg.get('fd_name', 'linear')
     run_base: bool = bool(cfg.get('run_base', True))
+    # Speed limit parameters
+    use_inferred_speed_limits: bool = bool(cfg.get('use_inferred_speed_limits', True))
+    V_f: float = float(cfg.get('V_f', 110.0))
+    speed_limit_percentile: int = int(cfg.get('speed_limit_percentile', 95))
+    valid_speed_limits: tuple = tuple(cfg.get('valid_speed_limits', [80, 100]))
     # Two-stage optimization parameters
-    use_lbfgs: bool = bool(cfg.get('use_lbfgs', False))
+    use_lbfgs: bool = bool(cfg.get('use_lbfgs', True))
     lbfgs_epochs: int | None = cfg.get('lbfgs_epochs', None)  # None means epochs//100
     # Plotting parameters
     plot_loss_history_flag: bool = bool(cfg.get('plot_loss_history', True))
@@ -611,6 +649,25 @@ def main():
     X, T, X_star = build_space_time_grid(x, t)
     idx_grid = build_index_grid(Exact, t)
     u_star = Exact.flatten()[:, None]
+    
+    # Conditionally infer free-flow speed per location based on config
+    if use_inferred_speed_limits:
+        print("\n" + "=" * 60)
+        print("Inferring location-based free-flow speed limits from data...")
+        print("=" * 60)
+        df_free_flow = infer_speed_limits(
+            Exact, x, 
+            valid_limits=valid_speed_limits, 
+            perc=speed_limit_percentile
+        )
+        print(f"Speed limits inferred using {speed_limit_percentile}th percentile")
+        print(f"Valid speed limits: {valid_speed_limits}")
+        print(f"Range: {df_free_flow['limit_assigned'].min():.1f} - {df_free_flow['limit_assigned'].max():.1f} km/h")
+    else:
+        print("\n" + "=" * 60)
+        print(f"Using default constant free-flow speed: {V_f:.1f} km/h")
+        print("=" * 60)
+        df_free_flow = None
 
     # Fill missing
     u_star, n_missing, u_mean = replace_missing_with_mean(u_star)
@@ -660,7 +717,7 @@ def main():
         print(f"Loading from: {pinn_checkpoint}")
         print("=" * 60)
         model_pinn = UnifiedPINN.load_from_checkpoint(
-            pinn_checkpoint, X_u_train, u_train, X_f_train
+            pinn_checkpoint, X_u_train, u_train, X_f_train, speed_limits_df=df_free_flow
         )
         # Load history if available
         if os.path.exists(pinn_meta_path):
@@ -678,7 +735,7 @@ def main():
         print("\n" + "=" * 60)
         print("Training PINN Model...")
         print("=" * 60)
-        model_pinn = build_model(X_u_train, u_train, X_f_train, layers, lb, ub, f_weight=f_weight, fd_name=fd_name)
+        model_pinn = build_model(X_u_train, u_train, X_f_train, layers, lb, ub, f_weight=f_weight, fd_name=fd_name, speed_limits_df=df_free_flow)
         start_time = time.time()
         out_pinn = model_pinn.fit(
             epochs=epochs,
@@ -730,7 +787,7 @@ def main():
             print(f"Loading from: {nn_checkpoint}")
             print("=" * 60)
             model_nn = UnifiedPINN.load_from_checkpoint(
-                nn_checkpoint, X_u_train, u_train, X_f_train
+                nn_checkpoint, X_u_train, u_train, X_f_train, speed_limits_df=df_free_flow
             )
             # Load history if available
             if os.path.exists(nn_meta_path):
@@ -748,7 +805,7 @@ def main():
             print("\n" + "=" * 60)
             print("Training Regular NN Model...")
             print("=" * 60)
-            model_nn = build_model(X_u_train, u_train, X_f_train, layers, lb, ub, f_weight=0.0, fd_name='nn')
+            model_nn = build_model(X_u_train, u_train, X_f_train, layers, lb, ub, f_weight=0.0, fd_name='nn', speed_limits_df=df_free_flow)
             model_nn = torch.compile(model_nn, mode="max-autotune")
             start_time = time.time()
             out_nn = model_nn.fit(
