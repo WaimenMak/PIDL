@@ -142,19 +142,37 @@ def select_sensor_columns(
     return X_u_train, u_train, idx_train, n_valid, selected_sensors, sensor_point_counts
 
 
+# def make_collocation(
+#     lb: np.ndarray, 
+#     ub: np.ndarray, 
+#     N_f: int, 
+#     X_u_train: np.ndarray
+# ) -> np.ndarray:
+#     """
+#     Generate physics collocation points using Latin Hypercube Sampling.
+#     Combines LHS points with supervised training points.
+#     """
+#     X_f_train = lb + (ub - lb) * lhs(2, N_f)
+#     X_f_train = np.vstack((X_f_train, X_u_train))
+#     return X_f_train.astype(np.float32)
+
+from scipy.stats import qmc
 def make_collocation(
     lb: np.ndarray, 
     ub: np.ndarray, 
     N_f: int, 
     X_u_train: np.ndarray
 ) -> np.ndarray:
-    """
-    Generate physics collocation points using Latin Hypercube Sampling.
-    Combines LHS points with supervised training points.
-    """
-    X_f_train = lb + (ub - lb) * lhs(2, N_f)
-    X_f_train = np.vstack((X_f_train, X_u_train))
-    return X_f_train.astype(np.float32)
+    # Sobol (skip=1024 for better balance), scramble for variance reduction
+    print('Sobol Sampling')
+    d = 2
+    sampler = qmc.Sobol(d=d, scramble=True)
+    sampler.fast_forward(1024)
+    X_f = sampler.random(N_f)
+    X_f = X_f[:N_f]
+    X_f = lb + (ub - lb) * X_f
+    X_f = np.vstack((X_f, X_u_train))
+    return X_f.astype(np.float32)
 
 
 # ----------------------------- Model Evaluation -------------------------------
@@ -222,16 +240,16 @@ def plot_all(
 
     ax = plt.subplot(gs0[:, :])
     ax.tick_params(axis='both', which='major', labelsize=16)
-    h = ax.imshow(Exact, interpolation='nearest', cmap='rainbow_r',
-                  extent=[x.min(), x.max(), t.min(), t.max()],
+    h = ax.imshow(Exact.T, interpolation='nearest', cmap='rainbow_r',
+                  extent=[t.min(), t.max(), x.min(), x.max()],
                   origin='lower', aspect='auto')
     divider = make_axes_locatable(ax)
     cax = divider.append_axes("right", size="5%", pad=0.05)
     cax.tick_params(labelsize=16)
     fig.colorbar(h, cax=cax)
-    ax.plot(X_u_train[:, 0], X_u_train[:, 1], 'kx', markersize=0.8, clip_on=False)
-    ax.set_ylabel('Time $t$ (15 min)', fontsize=18)
-    ax.set_xlabel('Location $x$ (km)', fontsize=18)
+    ax.plot(X_u_train[:, 1], X_u_train[:, 0], 'kx', markersize=0.8, clip_on=False)
+    ax.set_xlabel('Time $t$ (15 min)', fontsize=18)
+    ax.set_ylabel('Location $x$ (km)', fontsize=18)
     ax.set_title('Ground Truth: A13 Highway Speed (km/h)', fontsize=18)
 
     # Row 1: Observation Data
@@ -243,16 +261,16 @@ def plot_all(
     Observation = make_observation_matrix(Exact, idx_train)
     cmap = plt.cm.rainbow_r.copy()
     cmap.set_bad(color='white')
-    h = ax.imshow(Observation, interpolation='nearest', cmap=cmap,
-                  extent=[x.min(), x.max(), t.min(), t.max()],
+    h = ax.imshow(Observation.T, interpolation='nearest', cmap=cmap,
+                  extent=[t.min(), t.max(), x.min(), x.max()],
                   origin='lower', aspect='auto')
     divider = make_axes_locatable(ax)
     cax = divider.append_axes("right", size="5%", pad=0.05)
     cax.tick_params(labelsize=16)
     fig.colorbar(h, cax=cax)
-    ax.plot(X_u_train[:, 0], X_u_train[:, 1], 'k.', markersize=1.5, clip_on=False, alpha=0.5)
-    ax.set_ylabel('Time $t$ (15 min)', fontsize=18)
-    ax.set_xlabel('Location $x$ (km)', fontsize=18)
+    ax.plot(X_u_train[:, 1], X_u_train[:, 0], 'k.', markersize=1.5, clip_on=False, alpha=0.5)
+    ax.set_xlabel('Time $t$ (15 min)', fontsize=18)
+    ax.set_ylabel('Location $x$ (km)', fontsize=18)
     title_str = f'Observation Data (N={n_valid} points)'
     ax.set_title(title_str, fontsize=18)
 
@@ -261,16 +279,16 @@ def plot_all(
     gs1.update(top=0.47, bottom=0.27, left=0.15, right=0.85, wspace=1)
     ax = plt.subplot(gs1[:, :])
     ax.tick_params(axis='both', which='major', labelsize=16)
-    h = ax.imshow(U_pred, interpolation='nearest', cmap='rainbow_r',
-                  extent=[x.min(), x.max(), t.min(), t.max()],
+    h = ax.imshow(U_pred.T, interpolation='nearest', cmap='rainbow_r',
+                  extent=[t.min(), t.max(), x.min(), x.max()],
                   origin='lower', aspect='auto')
     divider = make_axes_locatable(ax)
     cax = divider.append_axes("right", size="5%", pad=0.05)
     cax.tick_params(labelsize=16)
     fig.colorbar(h, cax=cax)
-    ax.plot(X_u_train[:, 0], X_u_train[:, 1], 'kx', markersize=0.8, clip_on=False)
-    ax.set_ylabel('Time $t$ (15 min)', fontsize=18)
-    ax.set_xlabel('Location $x$ (km)', fontsize=18)
+    ax.plot(X_u_train[:, 1], X_u_train[:, 0], 'kx', markersize=0.8, clip_on=False)
+    ax.set_xlabel('Time $t$ (15 min)', fontsize=18)
+    ax.set_ylabel('Location $x$ (km)', fontsize=18)
     ax.set_title(f'PIDL {fd_name} Estimation (Error: {error_u:.4f})', fontsize=18)
 
     # Row 3: DL u(t,x)
@@ -278,16 +296,16 @@ def plot_all(
     gs2.update(top=0.22, bottom=0.02, left=0.15, right=0.85, wspace=1)
     ax = plt.subplot(gs2[:, :])
     ax.tick_params(axis='both', which='major', labelsize=16)
-    h = ax.imshow(U_pred2, interpolation='nearest', cmap='rainbow_r',
-                  extent=[x.min(), x.max(), t.min(), t.max()],
+    h = ax.imshow(U_pred2.T, interpolation='nearest', cmap='rainbow_r',
+                  extent=[t.min(), t.max(), x.min(), x.max()],
                   origin='lower', aspect='auto')
     divider = make_axes_locatable(ax)
     cax = divider.append_axes("right", size="5%", pad=0.05)
     cax.tick_params(labelsize=16)
     fig.colorbar(h, cax=cax)
-    ax.plot(X_u_train[:, 0], X_u_train[:, 1], 'kx', markersize=0.8, clip_on=False)
-    ax.set_ylabel('Time $t$ (15 min)', fontsize=18)
-    ax.set_xlabel('Location $x$ (km)', fontsize=18)
+    ax.plot(X_u_train[:, 1], X_u_train[:, 0], 'kx', markersize=0.8, clip_on=False)
+    ax.set_xlabel('Time $t$ (15 min)', fontsize=18)
+    ax.set_ylabel('Location $x$ (km)', fontsize=18)
     ax.set_title(f'DL Estimation (Error: {error_u2:.4f})', fontsize=18)
 
     if out_dir is None:
@@ -336,17 +354,19 @@ def plot_multi_models(
             cmap.set_bad(color='white')
         else:
             cmap = plt.cm.get_cmap(cmap_name)
+        # Transpose data to swap axes: time on x-axis, location on y-axis
         im = ax.imshow(
-            data, interpolation='nearest', cmap=cmap,
-            extent=[x.min(), x.max(), t.min(), t.max()],
+            data.T, interpolation='nearest', cmap=cmap,
+            extent=[t.min(), t.max(), x.min(), x.max()],
             origin='lower', aspect='auto'
         )
         ax.tick_params(axis='both', which='major', labelsize=14)
         if show_points:
             mk = 1.5 if obs else 0.8
-            ax.plot(X_u_train[:, 0], X_u_train[:, 1], 'k.' if obs else 'kx', markersize=mk, alpha=0.6, clip_on=False)
-        ax.set_ylabel('Time $t$ (15 min)', fontsize=15)
-        ax.set_xlabel('Location $x$ (km)', fontsize=15, labelpad=6)
+            # Swap x and y coordinates: plot time on x-axis, location on y-axis
+            ax.plot(X_u_train[:, 1], X_u_train[:, 0], 'k.' if obs else 'kx', markersize=mk, alpha=0.6, clip_on=False)
+        ax.set_xlabel('Time $t$ (15 min)', fontsize=15, labelpad=6)
+        ax.set_ylabel('Location $x$ (km)', fontsize=15)
         ax.set_title(title, fontsize=16, pad=10)
         cbar = fig.colorbar(im, ax=ax)
         cbar.ax.tick_params(labelsize=12)
