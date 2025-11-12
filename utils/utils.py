@@ -164,7 +164,7 @@ def make_collocation(
     X_u_train: np.ndarray
 ) -> np.ndarray:
     # Sobol (skip=1024 for better balance), scramble for variance reduction
-    print('Sobol Sampling')
+    print(f"\n  - Using Sobol sampling for collocation points")
     d = 2
     sampler = qmc.Sobol(d=d, scramble=True)
     sampler.fast_forward(1024)
@@ -396,5 +396,102 @@ def plot_multi_models(
         plt.show()
 
     print(f"\nPlots saved to {out_dir}/a13_multi_model_{N_u}.png")
+    print("=" * 60)
+
+
+def plot_training_history(
+    history: Dict[str, List[float]],
+    out_dir: str,
+    tag: str = "training",
+    show_physics: bool = True,
+    log_scale: bool = False,
+) -> None:
+    """
+    Plot training loss history (total, data, and physics losses).
+    
+    Args:
+        history: Dictionary with keys 'epoch', 'train_total', 'data_loss', 'phys_loss'
+        out_dir: Directory to save the plot
+        tag: Filename tag for the saved plot
+        show_physics: Whether to show physics loss (False for pure NN training)
+        log_scale: Whether to use log scale for y-axis
+    """
+    print("\n" + "=" * 60)
+    print("Generating training history plots...")
+    print("=" * 60)
+    
+    epochs = history['epoch']
+    train_total = history['train_total']
+    data_loss = history['data_loss']
+    phys_loss = history['phys_loss']
+    
+    # Create figure with subplots
+    if show_physics:
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        axes = axes.flatten()
+    else:
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        if not isinstance(axes, np.ndarray):
+            axes = [axes]
+    
+    # Plot 1: Total Loss
+    ax = axes[0]
+    ax.plot(epochs, train_total, 'b-', linewidth=1.5, label='Total Loss')
+    ax.set_xlabel('Epoch', fontsize=12)
+    ax.set_ylabel('Total Loss', fontsize=12)
+    ax.set_title('Total Training Loss', fontsize=14, fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=10)
+    if log_scale:
+        ax.set_yscale('log')
+    
+    # Plot 2: Data Loss
+    ax = axes[1]
+    ax.plot(epochs, data_loss, 'g-', linewidth=1.5, label='Data Loss')
+    ax.set_xlabel('Epoch', fontsize=12)
+    ax.set_ylabel('Data Loss', fontsize=12)
+    ax.set_title('Data Loss (MSE)', fontsize=14, fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=10)
+    if log_scale:
+        ax.set_yscale('log')
+    
+    if show_physics:
+        # Plot 3: Physics Loss
+        ax = axes[2]
+        ax.plot(epochs, phys_loss, 'r-', linewidth=1.5, label='Physics Loss')
+        ax.set_xlabel('Epoch', fontsize=12)
+        ax.set_ylabel('Physics Loss', fontsize=12)
+        ax.set_title('Physics Residual Loss', fontsize=14, fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=10)
+        if log_scale:
+            ax.set_yscale('log')
+        
+        # Plot 4: Combined view (all losses)
+        ax = axes[3]
+        ax.plot(epochs, train_total, 'b-', linewidth=1.5, label='Total Loss', alpha=0.8)
+        ax.plot(epochs, data_loss, 'g-', linewidth=1.5, label='Data Loss', alpha=0.8)
+        ax.plot(epochs, phys_loss, 'r-', linewidth=1.5, label='Physics Loss', alpha=0.8)
+        ax.set_xlabel('Epoch', fontsize=12)
+        ax.set_ylabel('Loss', fontsize=12)
+        ax.set_title('All Losses Combined', fontsize=14, fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=10)
+        if log_scale:
+            ax.set_yscale('log')
+    
+    plt.tight_layout()
+    
+    # Save plot
+    if out_dir is not None:
+        os.makedirs(out_dir, exist_ok=True)
+        filename = f'{out_dir}/loss_history_{tag}.png'
+        plt.savefig(filename, dpi=150, bbox_inches='tight')
+        print(f"Loss history plot saved to: {filename}")
+        plt.close()
+    else:
+        plt.show()
+    
     print("=" * 60)
 

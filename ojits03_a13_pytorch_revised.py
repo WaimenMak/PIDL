@@ -36,6 +36,7 @@ from utils.utils import (
     evaluate_model,
     plot_all,
     plot_multi_models,
+    plot_training_history,
 )
 
 class UnifiedPINN(nn.Module):
@@ -106,6 +107,14 @@ class UnifiedPINN(nn.Module):
         # model
         self.layers = layers
         self.model = self._initialize_NN(layers).to(self.device)
+        
+        # >>> NEW: speed limit breakpoint and values <<<
+        self.speed_break_km = 16.2
+        self.vf_left  = 100.0          # km/h for x < 16.2
+        self.vf_right = 80.0           # km/h for x >= 16.2
+        # For Greenberg you can use the same numbers for v_m unless you want different ones
+        self.vm_left  = self.vf_left
+        self.vm_right = self.vf_right
 
     # ----- architecture -----
     def _initialize_NN(self, layers):
@@ -219,10 +228,6 @@ class UnifiedPINN(nn.Module):
             r_free_nd = (u - v_f) / v_f        # non-dimensional free-flow constraint
 
             r_nd = s * r_cong_nd + (1.0 - s) * r_free_nd
-
-            # Optional: tiny extra penalty if you want to discourage u > v_f
-            # r_nd = r_nd + 0.05 * torch.clamp((u - v_f) / v_f, min=0.0)
-
         else:
             raise ValueError(f"Unknown fd_name='{self.fd_name}'")
 
@@ -243,6 +248,9 @@ class UnifiedPINN(nn.Module):
         physics_every: int = 1,                  # compute physics every k epochs
         grad_clip_norm: float | None = None,
         use_mixed_precision: bool = True,        # autocast if available
+        # two-stage optimization
+        use_lbfgs: bool = False,                 # whether to use L-BFGS after ADAM
+        lbfgs_epochs: int | None = None,         # L-BFGS epochs (defaults to epochs//100)
     ):
         torch.manual_seed(seed)
         np.random.seed(seed)
@@ -355,6 +363,121 @@ class UnifiedPINN(nn.Module):
         else:
             torch.save({"model_state_dict": self.state_dict()}, ckpt_path)
 
+        # ----- Two-stage optimization: L-BFGS refinement -----
+        if use_lbfgs:
+            print("\n" + "=" * 60)
+            print("Starting L-BFGS refinement stage...")
+            print("=" * 60)
+            
+            # Determine L-BFGS epochs
+            if lbfgs_epochs is None:
+                lbfgs_epochs = max(1, epochs // 100)
+            
+            print(f"Running L-BFGS for {lbfgs_epochs} epochs")
+            
+            # Create L-BFGS optimizer
+            optimizer_lbfgs = torch.optim.LBFGS(
+                self.parameters(),
+                lr=1.0,  # L-BFGS uses line search, lr=1.0 is standard
+                max_iter=20,
+                max_eval=25,
+                tolerance_grad=1e-7,
+                tolerance_change=1e-9,
+                history_size=100,
+                line_search_fn="strong_wolfe"
+            )
+            
+            # Prepare full physics points for L-BFGS (no subsampling)
+            use_physics_lbfgs = self.f_weight > 0.0
+            if use_physics_lbfgs:
+                x_f_full = self.x_f.requires_grad_(True)
+                t_f_full = self.t_f.requires_grad_(True)
+            
+            # Track L-BFGS history
+            lbfgs_best_loss = float("inf")
+            lbfgs_history = {"epoch": [], "train_total": [], "data_loss": [], "phys_loss": []}
+            
+            # Start L-BFGS epoch counting from where ADAM left off
+            adam_final_epoch = history["epoch"][-1] if history["epoch"] else epochs
+            
+            for lbfgs_ep in range(1, lbfgs_epochs + 1):
+                self.train()
+                
+                def closure():
+                    optimizer_lbfgs.zero_grad()
+                    
+                    # Data loss
+                    u_pred = self.net_u(x_u_tr, t_u_tr)
+                    data_loss = torch.mean((u_tr - u_pred) ** 2)
+                    
+                    # Physics loss
+                    if use_physics_lbfgs:
+                        f_pred = self.net_f(x_f_full, t_f_full)
+                        phys_loss = torch.mean(f_pred ** 2)
+                    else:
+                        phys_loss = torch.tensor(0.0, device=self.device)
+                    
+                    total_loss = data_loss + self.f_weight * phys_loss
+                    total_loss.backward()
+                    
+                    return total_loss
+                
+                # L-BFGS step
+                optimizer_lbfgs.step(closure)
+                
+                # Evaluate current loss for logging
+                with torch.no_grad():
+                    u_pred = self.net_u(x_u_tr, t_u_tr)
+                    data_loss = torch.mean((u_tr - u_pred) ** 2)
+                    
+                    if use_physics_lbfgs:
+                        f_pred = self.net_f(x_f_full, t_f_full)
+                        phys_loss = torch.mean(f_pred ** 2)
+                    else:
+                        phys_loss = torch.tensor(0.0, device=self.device)
+                    
+                    total_loss = data_loss + self.f_weight * phys_loss
+                    current_loss = float(total_loss.item())
+                
+                # Logging (using continuous epoch numbers)
+                continuous_epoch = adam_final_epoch + lbfgs_ep
+                if (lbfgs_ep % max(1, log_every // 10) == 0) or (lbfgs_ep == 1):
+                    print(f"[L-BFGS Epoch {continuous_epoch:05d}] train_total={current_loss:.4e} | data={data_loss.item():.4e} | phys={phys_loss.item():.4e}")
+                
+                lbfgs_history["epoch"].append(continuous_epoch)
+                lbfgs_history["train_total"].append(current_loss)
+                lbfgs_history["data_loss"].append(float(data_loss.item()))
+                lbfgs_history["phys_loss"].append(float(phys_loss.item()))
+                
+                # Save best L-BFGS model
+                if current_loss < lbfgs_best_loss:
+                    lbfgs_best_loss = current_loss
+                    best_train = current_loss  # Update overall best
+                    torch.save({
+                        "model_state_dict": self.state_dict(),
+                        "layers": self.layers,
+                        "lb": self.lb.detach().cpu().numpy().tolist(),
+                        "ub": self.ub.detach().cpu().numpy().tolist(),
+                        "normalize_labels": self.normalize_labels,
+                        "u_mean": float(self.u_mean.item()),
+                        "u_std": float(self.u_std.item()),
+                        "f_weight": self.f_weight,
+                        "V_f": self.V_f,
+                        "t_scale": self.t_scale,
+                        "fd_name": self.fd_name,
+                    }, ckpt_path)
+            
+            # Extend history with L-BFGS results
+            for key in ["epoch", "train_total", "data_loss", "phys_loss"]:
+                history[key].extend(lbfgs_history[key])
+            
+            # Reload best model from L-BFGS
+            if os.path.isfile(ckpt_path):
+                state = torch.load(ckpt_path, map_location=self.device)
+                self.load_state_dict(state["model_state_dict"])
+            
+            print(f"\nL-BFGS refinement complete. Best loss: {lbfgs_best_loss:.4e}")
+
         return {
             "best_train": best_train,
             "best_epoch": best_epoch,
@@ -458,6 +581,12 @@ def main():
     f_weight: float = float(cfg.get('f_weight', 1.0))
     fd_name: str = cfg.get('fd_name', 'linear')
     run_base: bool = bool(cfg.get('run_base', True))
+    # Two-stage optimization parameters
+    use_lbfgs: bool = bool(cfg.get('use_lbfgs', False))
+    lbfgs_epochs: int | None = cfg.get('lbfgs_epochs', None)  # None means epochs//100
+    # Plotting parameters
+    plot_loss_history_flag: bool = bool(cfg.get('plot_loss_history', True))
+    loss_plot_log_scale: bool = bool(cfg.get('loss_plot_log_scale', True))
 
     # Reproducibility
     set_seed(seed)
@@ -518,29 +647,69 @@ def main():
     X_f_train = make_collocation(lb, ub, N_f, X_u_train)
     print(f"\nTraining with {n_valid} data points (+ {N_f} collocation points)")
 
-    # Train PINN
-    pinn_dir = f"./runs/a13_exp1/" + timestamp_dir("pinn")
-    print("\n" + "=" * 60)
-    print("Training PINN Model...")
-    print("=" * 60)
-    model_pinn = build_model(X_u_train, u_train, X_f_train, layers, lb, ub, f_weight=f_weight, fd_name=fd_name)
-    start_time = time.time()
-    out_pinn = model_pinn.fit(
-        epochs=epochs,
-        lr=lr,
-        early_stop=EarlyStopConfig(patience=patience, min_delta=0.0, verbose=True),
-        save_dir=pinn_dir,
-        tag=f"pinn_{fd_name}",
-        log_every=log_every,
-        f_subset_per_epoch=min(4000, X_f_train.shape[0]),
-        physics_every=physics_every,
-        use_mixed_precision=True,
-    )
-    elapsed = time.time() - start_time
-    print(f"Training finished after {out_pinn['best_epoch']} epochs with best train loss {out_pinn['best_train']:.4e}")
-    print(f'Training time: {elapsed:.4f} seconds')
+    # Setup output directory for all results (models, plots, loss history)
+    os.makedirs(out_fig_dir, exist_ok=True)
+    
+    # Train PINN (or load if exists)
+    pinn_checkpoint = os.path.join(out_fig_dir, f"model_pinn_{fd_name}.pt")
+    pinn_meta_path = os.path.join(out_fig_dir, f"model_pinn_{fd_name}_meta.json")
+    
+    if os.path.exists(pinn_checkpoint):
+        print("\n" + "=" * 60)
+        print("PINN Model checkpoint found - Running in EVALUATION mode")
+        print(f"Loading from: {pinn_checkpoint}")
+        print("=" * 60)
+        model_pinn = UnifiedPINN.load_from_checkpoint(
+            pinn_checkpoint, X_u_train, u_train, X_f_train
+        )
+        # Load history if available
+        if os.path.exists(pinn_meta_path):
+            with open(pinn_meta_path, 'r') as f:
+                pinn_meta = json.load(f)
+            out_pinn = {
+                'best_train': pinn_meta.get('best_train', 0.0),
+                'best_epoch': pinn_meta.get('best_epoch', 0),
+                'history': pinn_meta.get('history', {"epoch": [], "train_total": [], "data_loss": [], "phys_loss": []}),
+            }
+        else:
+            out_pinn = {'best_train': 0.0, 'best_epoch': 0, 'history': {"epoch": [], "train_total": [], "data_loss": [], "phys_loss": []}}
+        elapsed = 0.0
+    else:
+        print("\n" + "=" * 60)
+        print("Training PINN Model...")
+        print("=" * 60)
+        model_pinn = build_model(X_u_train, u_train, X_f_train, layers, lb, ub, f_weight=f_weight, fd_name=fd_name)
+        start_time = time.time()
+        out_pinn = model_pinn.fit(
+            epochs=epochs,
+            lr=lr,
+            early_stop=EarlyStopConfig(patience=patience, min_delta=0.0, verbose=True),
+            save_dir=out_fig_dir,
+            tag=f"pinn_{fd_name}",
+            log_every=log_every,
+            f_subset_per_epoch=min(4000, X_f_train.shape[0]),
+            physics_every=physics_every,
+            use_mixed_precision=True,
+            use_lbfgs=use_lbfgs,
+            lbfgs_epochs=lbfgs_epochs,
+        )
+        elapsed = time.time() - start_time
+        print(f"Training finished after {out_pinn['best_epoch']} epochs with best train loss {out_pinn['best_train']:.4e}")
+        print(f'Training time: {elapsed:.4f} seconds')
+    
+    # Evaluate PINN
     error_u, U_pred, _ = evaluate_model(model_pinn, X_star, u_star, X, T, Exact)
     print(f'PINN Error u: {error_u:.4e}')
+    
+    # Plot training history for PINN
+    if plot_loss_history_flag:
+        plot_training_history(
+            history=out_pinn['history'],
+            out_dir=out_fig_dir,  # Save to figure output directory
+            tag=f"pinn_{fd_name}",
+            show_physics=(f_weight > 0.0),
+            log_scale=loss_plot_log_scale,
+        )
 
     # Collect model predictions for plotting
     model_predictions = []
@@ -552,26 +721,64 @@ def main():
 
     # Train pure NN (baseline) - optional based on run_base config
     if run_base:
-        nn_dir = f"./runs/a13_exp1/" + timestamp_dir("nn")
-        print("\n" + "=" * 60)
-        print("Training Regular NN Model...")
-        print("=" * 60)
-        model_nn = build_model(X_u_train, u_train, X_f_train, layers, lb, ub, f_weight=0.0, fd_name='nn')
-        start_time = time.time()
-        out_nn = model_nn.fit(
-            epochs=epochs,
-            lr=lr,
-            early_stop=EarlyStopConfig(patience=patience, min_delta=0.0, verbose=True),
-            save_dir=nn_dir,
-            tag="nn",
-            log_every=log_every,
-            use_mixed_precision=True,
-        )
-        elapsed = time.time() - start_time
-        print(f"Training finished after {out_nn['best_epoch']} epochs with best train loss {out_nn['best_train']:.4e}")
-        print(f'Training time: {elapsed:.4f} seconds')
+        nn_checkpoint = os.path.join(out_fig_dir, "model_nn.pt")
+        nn_meta_path = os.path.join(out_fig_dir, "model_nn_meta.json")
+        
+        if os.path.exists(nn_checkpoint):
+            print("\n" + "=" * 60)
+            print("NN Model checkpoint found - Running in EVALUATION mode")
+            print(f"Loading from: {nn_checkpoint}")
+            print("=" * 60)
+            model_nn = UnifiedPINN.load_from_checkpoint(
+                nn_checkpoint, X_u_train, u_train, X_f_train
+            )
+            # Load history if available
+            if os.path.exists(nn_meta_path):
+                with open(nn_meta_path, 'r') as f:
+                    nn_meta = json.load(f)
+                out_nn = {
+                    'best_train': nn_meta.get('best_train', 0.0),
+                    'best_epoch': nn_meta.get('best_epoch', 0),
+                    'history': nn_meta.get('history', {"epoch": [], "train_total": [], "data_loss": [], "phys_loss": []}),
+                }
+            else:
+                out_nn = {'best_train': 0.0, 'best_epoch': 0, 'history': {"epoch": [], "train_total": [], "data_loss": [], "phys_loss": []}}
+            elapsed = 0.0
+        else:
+            print("\n" + "=" * 60)
+            print("Training Regular NN Model...")
+            print("=" * 60)
+            model_nn = build_model(X_u_train, u_train, X_f_train, layers, lb, ub, f_weight=0.0, fd_name='nn')
+            model_nn = torch.compile(model_nn, mode="max-autotune")
+            start_time = time.time()
+            out_nn = model_nn.fit(
+                epochs=epochs,
+                lr=lr,
+                early_stop=EarlyStopConfig(patience=patience, min_delta=0.0, verbose=True),
+                save_dir=out_fig_dir,
+                tag="nn",
+                log_every=log_every,
+                use_mixed_precision=True,
+                use_lbfgs=use_lbfgs,
+                lbfgs_epochs=lbfgs_epochs,
+            )
+            elapsed = time.time() - start_time
+            print(f"Training finished after {out_nn['best_epoch']} epochs with best train loss {out_nn['best_train']:.4e}")
+            print(f'Training time: {elapsed:.4f} seconds')
+        
+        # Evaluate NN
         error_u2, U_pred2, _ = evaluate_model(model_nn, X_star, u_star, X, T, Exact)
         print(f'DL Error u: {error_u2:.4e}')
+        
+        # Plot training history for NN
+        if plot_loss_history_flag:
+            plot_training_history(
+                history=out_nn['history'],
+                out_dir=out_fig_dir,  # Save to figure output directory
+                tag="nn",
+                show_physics=False,  # No physics loss for pure NN
+                log_scale=loss_plot_log_scale,
+            )
 
         # Add baseline NN to predictions
         model_predictions.append({
@@ -592,7 +799,7 @@ def main():
             U_pred=model_predictions[0]['U_pred'], error_u=model_predictions[0]['error'],
             U_pred2=model_predictions[1]['U_pred'], error_u2=model_predictions[1]['error'],
             n_valid=n_valid, out_dir=out_fig_dir,
-            N_u=N_u,
+            N_u=N_u, fd_name=fd_name,
         )
     else:
         # Use plot_multi_models for single model or multiple models

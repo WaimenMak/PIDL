@@ -2,13 +2,13 @@
 # All parameters previously passed via CLI are specified here.
 
 # Data sources
-data_file: data/A13_Velocity_Data_0909-0910.txt
+data_file: data/A13_Velocity_Data_0909-0913.txt
 distance_json: td_data/2024-09-09.json
 
 # Model architecture
 layers: [2, 20, 20, 20, 20, 20, 20, 20, 20, 1]
 f_weight: 1.0    # weight for physics loss term
-fd_name: 'log'
+fd_name: 'linear'  # finite difference scheme for spatial derivatives ('linear' or 'quadratic')
 
 # Sampling and training sizes
 N_u: 800        # number of supervised (observation) points to sample when not using sensors
@@ -26,11 +26,18 @@ physics_every: 1
 patience: 2000
 seed: 25
 
+# Two-stage optimization (ADAM then L-BFGS)
+use_lbfgs: true        # Enable L-BFGS refinement after ADAM
+lbfgs_epochs: null      # Number of L-BFGS epochs (null = epochs//100)
+
 # Model training options
 run_base: false  # whether to train baseline NN model (f_weight=0.0) for comparison
 
 # Output
-out_fig_dir: FD_log
+out_fig_dir: FD_Sobol_5day_5s_10knf_lbfgs_run3
+plot_loss_history: true   # Whether to plot and save training loss history
+loss_plot_log_scale: true # Use log scale for loss plots
 
 # Fast mode (for smoke tests)
 fast: false
+

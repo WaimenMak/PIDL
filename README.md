@@ -76,8 +76,14 @@ Both paths are set in the configs.
 - `run_base: false` – train pure NN baseline for comparison
 - `fast: false` – quick smoke test mode
 
+**Two-stage optimization (ADAM → L-BFGS):**
+- `use_lbfgs: false` – enable L-BFGS refinement after ADAM converges
+- `lbfgs_epochs: null` – L-BFGS epochs (null = epochs//100, e.g., 100 for 10000 ADAM epochs)
+
 **Output:**
 - `out_fig_dir: FD_log` – where plots are saved
+- `plot_loss_history: true` – save training loss history plots
+- `loss_plot_log_scale: true` – use log scale for loss plots
 
 2) Run the script:
 
@@ -85,10 +91,47 @@ Both paths are set in the configs.
 python ojits03_a13_pytorch_revised.py --config configs/config.yaml
 ```
 
-3) Outputs:
-- Checkpoints in `runs/a13_exp1/<timestamped folders>`
-- Plots in the specified `out_fig_dir`
+3) Outputs (all saved to `out_fig_dir`):
+- **Model checkpoints:**
+  - `model_pinn_{fd_name}.pt` – best PINN model weights and architecture
+  - `model_pinn_{fd_name}_meta.json` – training metadata and history
+  - `model_nn.pt` / `model_nn_meta.json` (if run_base=true)
+- **Visualization:**
+  - `a13_multi_model_{N_u}.png` – spatiotemporal predictions
+  - `loss_history_pinn_{fd_name}.png` – training loss plots (if plot_loss_history=true)
+  - `loss_history_nn.png` (if run_base=true and plot_loss_history=true)
 - Console logs show per-epoch training and final metrics
+
+**Evaluation mode:** If model checkpoints already exist in `out_fig_dir`, the script automatically loads them and runs in evaluation mode instead of retraining. This allows you to quickly regenerate plots or test on different data without re-running expensive training.
+
+## Training optimization strategies
+
+### ADAM (default)
+Fast first-order optimizer with adaptive learning rates. Good for initial exploration and noisy gradients.
+
+### Two-stage: ADAM → L-BFGS (recommended for best convergence)
+1. **ADAM phase**: Runs for configured `epochs` with early stopping
+2. **L-BFGS phase**: Quasi-Newton method for final refinement
+   - Uses full physics points (no subsampling)
+   - Strong Wolfe line search for optimal step size
+   - Typically converges in `epochs//100` iterations
+   - Better final precision than ADAM alone
+
+Enable in config:
+```yaml
+use_lbfgs: true
+lbfgs_epochs: null  # Auto: epochs//100, or specify a number
+```
+
+### Loss history visualization
+
+When `plot_loss_history: true`, generates plots showing:
+- **For PINN**: Total loss, Data loss, Physics loss, and combined overlay
+- **For NN**: Total loss and Data loss
+- **Log scale** (default): Better visualization of convergence behavior
+- **Both phases**: ADAM + L-BFGS epochs displayed together
+
+Plots saved to model checkpoint directories.
 
 ## Multi-experiments: sweep sensor counts and FD types
 
@@ -149,3 +192,6 @@ python run_multi_sensor_experiments.py --config configs/config_multi.yaml
 - **Smoke tests:** Set `fast: true` in configs to verify the pipeline quickly
 - **Reproducibility:** `seed` controls random sampling and training initialization
 - **Custom FD models:** Extend `UnifiedPINN.net_f()` in `ojits03_a13_pytorch_revised.py` and add to configs
+- **Better convergence:** Enable L-BFGS refinement (`use_lbfgs: true`) for improved final accuracy
+- **Debug training:** Use loss history plots (`plot_loss_history: true`) to diagnose convergence issues
+- **Spatiotemporal plots:** Note that plots show time on x-axis and location on y-axis (standard convention)
