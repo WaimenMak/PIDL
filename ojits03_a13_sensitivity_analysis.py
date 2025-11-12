@@ -13,6 +13,7 @@ Previously completed tasks:
 """
 
 import random
+from types import MethodType
 import torch
 import torch.nn as nn
 import numpy as np
@@ -28,6 +29,8 @@ from matplotlib.ticker import MultipleLocator
 import pandas as pd
 from tqdm import tqdm
 import os
+import json
+
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
 # imported modules for PINN and NN models
@@ -37,7 +40,7 @@ se = 25
 np.random.seed(se)
 torch.manual_seed(se)
 
-# one run 
+# multi run 
 if __name__ == "__main__":
     ## Fixed parameters ##
     layers = [2, 20, 20, 20, 20, 20, 20, 20, 20, 1]
@@ -82,8 +85,10 @@ if __name__ == "__main__":
                  n_sensors = 5,
                  N_u=800, 
                  N_f=10000, 
+                 f_weight=1.0,
                  u_obs_noise_type=None, 
-                 u_obs_noise_level=None):
+                 u_obs_noise_level=None,
+                 test_hyper = None):
 
         print("\n" + "#"*60)
         if chose_obs_based_on_sensors:
@@ -185,6 +190,24 @@ if __name__ == "__main__":
         print("="*60)
         # Enable label normalization to help PINN learn better
         model = PhysicsInformedNN(X_u_train, u_train, X_f_train, layers, lb, ub, normalize_labels=True)
+        model.f_weight = torch.tensor(f_weight, device=model.x_u.device, dtype=model.x_u.dtype)
+
+        def new_loss_closure(self):
+            self.optimizer.zero_grad()
+
+            u_pred = self.net_u(self.x_u, self.t_u)
+            f_pred = self.net_f(self.x_f, self.t_f)
+
+            loss = torch.mean(torch.square(self.u - u_pred)) + self.f_weight * torch.mean(torch.square(f_pred))
+
+            loss.backward()
+            self.iter += 1
+            if self.iter % 100 == 0:
+                print(f'Iter: {self.iter}, Loss: {loss.item():.4e}')
+            return loss
+        
+        model.loss_closure = MethodType(new_loss_closure, model)
+        
         start_time = time.time()
         model.train_model()
         elapsed = time.time() - start_time
@@ -196,35 +219,70 @@ if __name__ == "__main__":
         Error = np.abs(Exact - U_pred)
 
         # Regular NN Model
-        print("\n" + "="*60)
-        print("Training Regular NN Model...")
-        print("="*60)
-        # Enable label normalization to help NN learn better (prevents constant predictions)
-        model2 = NN(X_u_train, u_train, X_f_train, layers, lb, ub, normalize_labels=True)
-        start_time2 = time.time()
-        model2.train_model()
-        elapsed2 = time.time() - start_time2
-        print(f'Training time: {elapsed2:.4f} seconds')
-        u_pred2, f_pred2 = model2.predict(X_star)
-        error_u2 = np.linalg.norm(u_star - u_pred2, 2) / np.linalg.norm(u_star, 2)
-        print(f'DL Error u: {error_u2:.4e}')
-        U_pred2 = griddata(X_star, u_pred2.flatten(), (X, T), method='cubic')
-        Error2 = np.abs(Exact - U_pred2)
+        if test_hyper == 'N_f' or test_hyper == 'f_weight':
+            # skip NN training when testing N_f or f_weight sensitivity
+            print("Skipping NN training for N_f or f_weight sensitivity test")
+            error_u2 = None
+            Error2 = None
+        else:
+            print("\n" + "="*60)
+            print("Training Regular NN Model...")
+            print("="*60)
+            # Enable label normalization to help NN learn better (prevents constant predictions)
+            model2 = NN(X_u_train, u_train, X_f_train, layers, lb, ub, normalize_labels=True)
+            start_time2 = time.time()
+            model2.train_model()
+            elapsed2 = time.time() - start_time2
+            print(f'Training time: {elapsed2:.4f} seconds')
+            u_pred2, f_pred2 = model2.predict(X_star)
+            error_u2 = np.linalg.norm(u_star - u_pred2, 2) / np.linalg.norm(u_star, 2)
+            print(f'DL Error u: {error_u2:.4e}')
+            U_pred2 = griddata(X_star, u_pred2.flatten(), (X, T), method='cubic')
+            Error2 = np.abs(Exact - U_pred2)
 
-        sa_dict = {
-                    'N_u': N_u,
-                    'N_f': N_f,
-                    'u_obs_noise': u_obs_noise,
-                    'chose_obs_based_on_sensors': chose_obs_based_on_sensors,
-                    'n_sensors': n_sensors,
-                    'u_obs_noise_type': u_obs_noise_type,
-                    'u_obs_noise_level': u_obs_noise_level
-                }
+        # sa_dict = {
+        #             'N_u': N_u,
+        #             'N_f': N_f,
+        #             'u_obs_noise': u_obs_noise,
+        #             'chose_obs_based_on_sensors': chose_obs_based_on_sensors,
+        #             'n_sensors': n_sensors,
+        #             'u_obs_noise_type': u_obs_noise_type,
+        #             'u_obs_noise_level': u_obs_noise_level
+        #         }
 
-        plot_results(Exact, x, t, n_valid, 
-                     idx_train, X_u_train, U_pred, U_pred2, error_u, error_u2, sa_dict)
+        # plot_results(Exact, x, t, n_valid, 
+        #              idx_train, X_u_train, U_pred, U_pred2, error_u, error_u2, sa_dict)
 
-        return [error_u, error_u2]
+        return [error_u, error_u2, Error, Error2]
+    
+    def run_multiple_runs(x,t,u_star,
+                          chose_obs_based_on_sensors=True,
+                          params={},
+                          n_runs=10):
+        PINN_errors = []
+        PINN_errors_std = []
+        NN_errors = []
+        NN_errors_std = []
+        for run in range(n_runs):
+            setting_seed = se + run*10
+            np.random.seed(setting_seed)
+            PINN_error, NN_error, full_PINN_ae, full_NN_ae = run_once(x,t,u_star,
+                                        chose_obs_based_on_sensors=chose_obs_based_on_sensors,
+                                        n_sensors=params['n_sensors'],
+                                        N_u=800,
+                                        N_f=params['N_f'],
+                                        f_weight=params['f_weight'],
+                                        u_obs_noise_type=params['u_obs_noise_type'],
+                                        u_obs_noise_level=params['u_obs_noise_level'],
+                                        test_hyper = params['hyper'])
+            PINN_errors.append(PINN_error)
+            PINN_errors_std.append(np.std(full_PINN_ae))
+            NN_errors.append(NN_error)
+            if params['hyper'] != 'N_f' and params['hyper'] != 'f_weight':
+                NN_errors_std.append(np.std(full_NN_ae))
+            else:
+                NN_errors_std.append(0.0)  # dummy value
+        return PINN_errors, NN_errors, PINN_errors_std, NN_errors_std
 
     def plot_results(Exact, x, t, n_valid, 
                      idx_train, X_u_train, U_pred, U_pred2, error_u, error_u2, sa_dict):
@@ -340,42 +398,91 @@ if __name__ == "__main__":
         print("="*60)
 
     ########### Sensitivity Analysis Execution ###########
-    # init: N_u = 800, N_f = 10000, u_obs_noise = 0.0
-    # N_u_lst = [int(0.1 * u_star.shape[0]), int(0.2 * u_star.shape[0]), int(0.3 * u_star.shape[0])]  # 10%, 20%, 30%
-    n_sensors_lst = [5]
-    # n_sensors_lst = [15]
 
-    # n_sensors_lst = [3,5,7,10,15]
+    #  one hyperparameter changes per sensitivity analysis run
+    hyper = 'f_weight'  # Choose from 'N_f', 'u_obs_noise_level', 'n_sensors', 'f_weight'
+
+    default_hyperparameters = {
+        'n_sensors': 5,
+        'N_f': 10000,
+        'u_obs_noise_type': 'Gumbel',
+        'u_obs_noise_level': 0.0,
+        'f_weight': 1.0
+    }
+
+    def get_hyperparameter_range(hyper):
+        if hyper == 'N_f':
+            return [1000, 3000, 6000, 10000] 
+        elif hyper == 'u_obs_noise_level':
+            return [0.0, 0.05, 0.1, 0.2]
+        elif hyper == 'n_sensors':
+            return [3, 5, 7, 10, 15]
+        elif hyper == 'f_weight':
+            return [0.1, 0.5, 1.0, 2.0, 5.0]
+        else:
+            raise ValueError("Unknown hyperparameter for sensitivity analysis")
+
+    n_runs = 5  # Number of runs per hyperparameter setting
     chose_obs_based_on_sensors = True  # Set to True to use sensor-based selection
-    N_f_lst = [10000]  # Example collocation points
-    # N_f_lst = [3000, 6000, 10000]  # Example collocation points
-    u_obs_noise_type = ['Gaussian', 'Gumbel']
-    # u_obs_noise_lst = [0.0]  
-    u_obs_noise_lst = [0.05, 0.1, 0.2]  # Example: 0%, 5%, 10%, 20% noise
 
     PINN_error_results = {}
     NN_error_results = {}
 
-    for N_sensor in tqdm(n_sensors_lst):
-        for N_f in tqdm(N_f_lst):
-            for u_obs_noise_type in u_obs_noise_type:
-                for u_obs_noise in tqdm(u_obs_noise_lst):
-                    combi = (N_sensor, N_f, u_obs_noise_type, u_obs_noise)
-                    print('SA COMBINATION:', combi)
-                    PINN_error, NN_error = run_once(x,t,u_star,
-                                 chose_obs_based_on_sensors=chose_obs_based_on_sensors,
-                                 n_sensors = N_sensor,
-                                 N_u=800,
-                                 N_f=N_f,
-                                 u_obs_noise_type=u_obs_noise_type,
-                                 u_obs_noise_level=u_obs_noise)
-                    PINN_error_results[combi] = PINN_error
-                    NN_error_results[combi] = NN_error
+    # test saving path
+    if not os.path.exists('results/sa_results'):
+        os.makedirs('results/sa_results')
+    #  test save empty dictionary file
+    with open(f'results/sa_results/PINN_sa_{hyper}.json', 'w') as f:
+        json.dump(PINN_error_results, f, indent=2)
+    with open(f'results/sa_results/NN_sa_{hyper}.json', 'w') as f:
+        json.dump(NN_error_results, f, indent=2)
 
-    combi_ary = np.array(list(PINN_error_results.keys()))
-    PINN_ary = np.array(list(PINN_error_results.values()))
-    NN_ary = np.array(list(NN_error_results.values()))
+    print('we are running sensitivity analysis on:', hyper)
 
-    print(combi_ary)
-    print(PINN_ary)
-    print(NN_ary)
+    hyper_range = get_hyperparameter_range(hyper)
+
+    for val in tqdm(hyper_range):
+        # set hyperparameter to current value
+        params = default_hyperparameters.copy()
+        params['hyper'] = hyper  # pass hyperparameter name for logging
+        params[hyper] = val
+        print('SA VALUE:', val)
+        PINN_errors, NN_errors, PINN_errors_std, NN_errors_std = run_multiple_runs(x,t,u_star,
+                                                chose_obs_based_on_sensors=chose_obs_based_on_sensors,
+                                                params=params,
+                                                n_runs=n_runs)
+        if hyper == 'N_f' or hyper == 'f_weight':
+            # save only PINN results for N_f and f_weight sensitivity
+            NN_errors = [-10.0]  # dummy value
+            NN_errors_std = [-10.0]  # dummy value
+        # mean L2 errors and stddev, mean AE stddev and stddev of stddevs
+        PINN_error_results[val] = (np.mean(PINN_errors), np.std(PINN_errors), np.mean(PINN_errors_std), np.std(PINN_errors_std))
+        NN_error_results[val] = (np.mean(NN_errors), np.std(NN_errors), np.mean(NN_errors_std), np.std(NN_errors_std))
+
+    # save results to json files
+    with open(f'results/sa_results/PINN_sa_{hyper}.json', 'w') as f:
+        json.dump(PINN_error_results, f, indent=2)
+    with open(f'results/sa_results/NN_sa_{hyper}.json', 'w') as f:
+        json.dump(NN_error_results, f, indent=2)
+
+    # plot results
+    sa_vals = list(PINN_error_results.keys())
+    PINN_means = [PINN_error_results[val][0] for val in sa_vals]
+    PINN_stds = [PINN_error_results[val][1] for val in sa_vals]
+    NN_means = [NN_error_results[val][0] for val in sa_vals]
+    NN_stds = [NN_error_results[val][1] for val in sa_vals]
+    plt.figure(figsize=(8,6))
+    plt.errorbar(sa_vals, PINN_means, yerr=PINN_stds,
+                 label='PINN', marker='o', capsize=5)
+    if hyper != 'N_f' and hyper != 'f_weight':  # skip NN plot for N_f and f_weight sensitivity
+        plt.errorbar(sa_vals, NN_means, yerr=NN_stds,
+                    label='NN', marker='s', capsize=5)
+    plt.xlabel(hyper, fontsize=16)
+    plt.ylabel('Mean L2 Relative Error', fontsize=16)
+    plt.title(f'Sensitivity Analysis on {hyper}', fontsize=18)
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(f"results/sa_results/SA_{hyper}.jpg")
+    plt.show()
+
+    
