@@ -55,12 +55,15 @@ class UnifiedPINN(nn.Module):
         lb, ub,           # 2-dim lower/upper bounds (for input normalization)
         normalize_labels: bool = True,
         f_weight: float = 1.0,      # 0.0 => pure NN, >0.0 => PINN
-        V_f: float = 110.0,         # free flow speed (km/h) - used as default if speed_limits_df not provided
+        V_f: float = 100.0,         # free flow speed (km/h) - used as default if speed_limits_df not provided
         t_scale: float = 0.25,      # time scaling in PDE
         device: str = None,
         # >>> NEW <<<
         fd_name: str = "linear",   # 'linear'| 'log' | 'exp' | 'power' | 'triangular' | 'nn'
         speed_limits_df: pd.DataFrame = None,  # DataFrame with columns ['x', 'limit_assigned'] for location-based speeds
+        # Triangular FD hyperparameters
+        tri_w: float = 20.0,       # Wave speed parameter for triangular FD
+        tri_alpha: float = 20.0,   # Sigmoid steepness for triangular FD
     ):
         super().__init__()
         print(f"Initializing PINN with fd_name='{fd_name}', f_weight={f_weight}")
@@ -69,6 +72,10 @@ class UnifiedPINN(nn.Module):
         self.V_f = float(V_f)
         self.t_scale = float(t_scale)
         self.fd_name = fd_name.lower()
+        
+        # Triangular FD hyperparameters
+        self.tri_w = float(tri_w)
+        self.tri_alpha = float(tri_alpha)
 
         # bounds
         self.lb = torch.tensor(lb, dtype=torch.float32, device=self.device)
@@ -234,8 +241,8 @@ class UnifiedPINN(nn.Module):
 
         elif fd == "triangular":
             # r_nd = s(u)*( (1/w)u_t - u_x ) + (1-s(u)) * (u - v_f)/v_f
-            w = 15.0
-            alpha = 20.0
+            w = self.tri_w
+            alpha = self.tri_alpha
             s = torch.sigmoid(torch.tensor(alpha, device=u.device, dtype=u.dtype) * (v_f - u))
             r_cong_nd = (u_t / w) - u_x
             r_free_nd = (u - v_f) / v_f
@@ -568,14 +575,18 @@ def build_model(
     ub: np.ndarray, 
     f_weight: float,
     fd_name: str,
-    speed_limits_df: pd.DataFrame = None
+    V_f: float,
+    speed_limits_df: pd.DataFrame = None,
+    tri_w: float = 20.0,
+    tri_alpha: float = 20.0,
 ) -> UnifiedPINN:
     """Convenience function to build a UnifiedPINN model with standard settings."""
     return UnifiedPINN(
         X_u=X_u_train, u=u_train, X_f=X_f_train, layers=layers,
         lb=lb, ub=ub, normalize_labels=True,
-        f_weight=f_weight, V_f=110.0, t_scale=0.25, fd_name=fd_name,
-        speed_limits_df=speed_limits_df
+        f_weight=f_weight, V_f=V_f, t_scale=0.25, fd_name=fd_name,
+        speed_limits_df=speed_limits_df,
+        tri_w=tri_w, tri_alpha=tri_alpha
     )
 
 
@@ -616,7 +627,7 @@ def main():
     run_base: bool = bool(cfg.get('run_base', True))
     # Speed limit parameters
     use_inferred_speed_limits: bool = bool(cfg.get('use_inferred_speed_limits', True))
-    V_f: float = float(cfg.get('V_f', 110.0))
+    V_f: float = float(cfg.get('V_f', 100.0))
     speed_limit_percentile: int = int(cfg.get('speed_limit_percentile', 95))
     valid_speed_limits: tuple = tuple(cfg.get('valid_speed_limits', [80, 100]))
     # Two-stage optimization parameters
@@ -643,10 +654,14 @@ def main():
     print(f"Time steps: {vel.shape[1]}")
 
     x = load_distances(distance_json, n_locations_hint=vel.shape[0])
+    # Flip x to have start of highway at top (higher km at index 0)
+    x = np.flipud(x)
     t = np.arange(vel.shape[1]).reshape(-1, 1)
 
-    Exact = np.real(vel.T)
-    X, T, X_star = build_space_time_grid(x, t)
+    # Keep Exact as (n_locations, n_timesteps) - NO transpose
+    # Flip vertically to match flipped x coordinates
+    Exact = np.flipud(np.real(vel.values))
+    T, X, X_star = build_space_time_grid(x, t)
     idx_grid = build_index_grid(Exact, t)
     u_star = Exact.flatten()[:, None]
     
@@ -735,7 +750,7 @@ def main():
         print("\n" + "=" * 60)
         print("Training PINN Model...")
         print("=" * 60)
-        model_pinn = build_model(X_u_train, u_train, X_f_train, layers, lb, ub, f_weight=f_weight, fd_name=fd_name, speed_limits_df=df_free_flow)
+        model_pinn = build_model(X_u_train, u_train, X_f_train, layers, lb, ub, f_weight=f_weight, fd_name=fd_name, V_f=V_f, speed_limits_df=df_free_flow)
         start_time = time.time()
         out_pinn = model_pinn.fit(
             epochs=epochs,
@@ -755,7 +770,7 @@ def main():
         print(f'Training time: {elapsed:.4f} seconds')
     
     # Evaluate PINN
-    error_u, U_pred, _ = evaluate_model(model_pinn, X_star, u_star, X, T, Exact)
+    error_u, U_pred, _ = evaluate_model(model_pinn, X_star, u_star, T, X, Exact)
     print(f'PINN Error u: {error_u:.4e}')
     
     # Plot training history for PINN
@@ -805,7 +820,7 @@ def main():
             print("\n" + "=" * 60)
             print("Training Regular NN Model...")
             print("=" * 60)
-            model_nn = build_model(X_u_train, u_train, X_f_train, layers, lb, ub, f_weight=0.0, fd_name='nn', speed_limits_df=df_free_flow)
+            model_nn = build_model(X_u_train, u_train, X_f_train, layers, lb, ub, f_weight=0.0, fd_name='nn', V_f = V_f, speed_limits_df=df_free_flow)
             model_nn = torch.compile(model_nn, mode="max-autotune")
             start_time = time.time()
             out_nn = model_nn.fit(
@@ -824,7 +839,7 @@ def main():
             print(f'Training time: {elapsed:.4f} seconds')
         
         # Evaluate NN
-        error_u2, U_pred2, _ = evaluate_model(model_nn, X_star, u_star, X, T, Exact)
+        error_u2, U_pred2, _ = evaluate_model(model_nn, X_star, u_star, T, X, Exact)
         print(f'DL Error u: {error_u2:.4e}')
         
         # Plot training history for NN

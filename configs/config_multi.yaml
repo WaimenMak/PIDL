@@ -7,14 +7,24 @@ distance_json: td_data/2024-09-09.json
 # Model architecture
 layers: [2, 20, 20, 20, 20, 20, 20, 20, 20, 1]
 
+# Physics weight configuration
+# f_weight controls the balance between data loss and physics loss
+# f_weight = 0.0: Pure neural network (no physics)
+# f_weight = 1.0: Standard PINN (equal weighting)
+# f_weight > 1.0: More emphasis on physics
+# For experiments, you can test multiple values: [0.0, 0.5, 1.0, 2.0, 5.0]
+f_weight_list: [0.1]  # List of physics weights to test
+
 # Speed limit configuration
-use_inferred_speed_limits: true  # If true, infer location-based speed limits from data; if false, use default V_f
-V_f: 100.0                        # Default free-flow speed (km/h) - used when use_inferred_speed_limits=false
+use_inferred_speed_limits: false  # If true, infer location-based speed limits from data; if false, use default V_f
+V_f: 100.0                       # Default free-flow speed (km/h) - used when use_inferred_speed_limits=false
 speed_limit_percentile: 95        # Percentile for inferring speed limits (when use_inferred_speed_limits=true)
 valid_speed_limits: [80, 100]    # Allowed discrete speed limits (km/h) for assignment
 
 # Physics collocation points
-N_f: 10000
+# Can specify a list to test multiple values: N_f_list: [3000, 5000, 10000]
+# Or use single value (backward compatible): N_f: 3000
+N_f_list: [2000]
 physics_every: 1
 
 # Fundamental diagram types to test
@@ -22,7 +32,9 @@ physics_every: 1
 # Note: Use 'nn' to include a baseline neural network (f_weight=0.0, no physics)
 # fd_name_list: ['linear', 'log', 'exp', 'power', 'triangular']
 # To include baseline NN: fd_name_list: ['linear', 'log', 'exp', 'power', 'triangular', 'nn']
-fd_name_list: ['linear']
+# fd_name_list: ['linear', 'log','triangular']
+# fd_name_list: ['linear']
+fd_name_list: ['nn']
 
 # Optimization
 epochs: 10000
@@ -32,22 +44,29 @@ patience: 2000
 seed: 25
 
 # Two-stage optimization (ADAM then L-BFGS)
-use_lbfgs: true        # Enable L-BFGS refinement after ADAM
+use_lbfgs: false        # Enable L-BFGS refinement after ADAM
 lbfgs_epochs: 300      # Number of L-BFGS epochs (null = epochs//100)
 
 # Output visualization
 plot_loss_history: true   # Whether to plot and save training loss history
 loss_plot_log_scale: true # Use log scale for loss plots
 
+# Noise experiment settings
+noise_type: relative_gaussian
+# Run multiple noise levels in one go
+noise_levels: [0.05, 0.1, 0.2]
+# noise_levels: [0.0]
+
 # Experiment grid
 num_runs: 3
-# sensor_list: [3,5,7,10]
+# sensor_list: [3,5,7]
 sensor_list: [5]
 # Output directories and files
-base_run_dir: Results_multi_speed/runs/a13_multi
-results_out: Results_multi_speed/summary/a13_multi_results.csv
-summary_out: Results_multi_speed/summary/a13_multi_summary.csv
+base_run_dir: Final_result_1speed_noise_b/runs/a13_multi
+results_out: Final_result_1speed_noise_b/summary/a13_multi_results.csv
+summary_out: Final_result_1speed_noise_b/summary/a13_multi_summary.csv
 
 # Fast mode for smoke tests (reduces epochs and N_f)
 fast: false
+  
   

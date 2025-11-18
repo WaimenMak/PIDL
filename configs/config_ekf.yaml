@@ -1,0 +1,61 @@
+# Extended Kalman Filter (EKF) configuration for traffic speed estimation
+
+# Data sources
+data_file: data/A13_Velocity_Data_0909-0910.txt
+distance_json: td_data/2024-09-09.json
+
+# Fundamental diagram type
+# Options: 'linear' (Greenshields), 'log' (Greenberg), 'exp' (Underwood)
+fd_name: linear
+
+# Traffic model parameters
+V_f: 100.0                    # Free-flow speed (km/h)
+rho_max: 180.0                # Maximum density (vehicles/km) - used for FD calculations
+rho_jam: 180.0                # Jam density (vehicles/km) for Greenshields
+
+# EKF parameters
+process_noise_std: 5.0        # Process noise std deviation (km/h) - model uncertainty
+measurement_noise_std: 2.0    # Measurement noise std deviation (km/h) - sensor uncertainty
+initial_state_std: 10.0       # Initial state uncertainty (km/h)
+
+# Time discretization
+dt_data: 0.25                 # Data sampling time step in hours (0.25 = 15 minutes - matches data)
+dt: 0.002                     # Internal EKF time step in hours (0.002 = 7.2 seconds for CFL stability)
+use_adaptive_dt: false        # Whether to use adaptive time stepping
+
+# Space discretization (already defined by data grid)
+# dx is computed from distance_json
+
+# Numerical stability
+cfl_factor: 0.5               # CFL condition: dt <= cfl_factor * dx / max_wave_speed
+use_flux_limiter: true        # Use flux limiter for stability (minmod, superbee, etc.)
+flux_limiter: minmod          # Options: minmod, superbee, vanleer
+
+# Sensor configuration for experiments
+sensor_list: [4]                # Number of sensors to test (quick test)
+runs_per_config: 1              # Number of independent runs per sensor count
+seed: 42                        # Base random seed
+
+# Data preprocessing
+replace_missing: true         # Replace missing values (-1.0) with spatial mean
+min_valid_speed: 10.0         # Minimum valid speed (km/h)
+max_valid_speed: 130.0        # Maximum valid speed (km/h)
+
+# Output configuration
+output_dir: Results_EKF
+save_plots: true
+save_state_history: false      # Save full state evolution (large files)
+plot_every: 10                 # Plot every N time steps
+log_every: 20                  # Log progress every N time steps
+
+# Evaluation metrics
+metrics:
+  - rmse                       # Root mean square error
+  - mae                        # Mean absolute error
+  - mape                       # Mean absolute percentage error
+  - r2                         # R-squared coefficient
+
+# Advanced options
+use_enhanced_ekf: false        # Use enhanced EKF with Joseph form covariance update
+use_covariance_inflation: false # Apply covariance inflation to prevent filter divergence
+inflation_factor: 1.05         # Multiplicative inflation factor (if use_covariance_inflation=true)

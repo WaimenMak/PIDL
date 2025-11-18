@@ -7,8 +7,8 @@ distance_json: td_data/2024-09-09.json
 
 # Model architecture
 layers: [2, 20, 20, 20, 20, 20, 20, 20, 20, 1]
-f_weight: 1.0    # weight for physics loss term
-fd_name: 'linear'  # finite difference scheme for spatial derivatives ('linear' or 'quadratic')
+f_weight: 0.1    # weight for physics loss term
+fd_name: 'linear'  # ['linear', 'log', 'exp', 'power', 'triangular', 'nn']
 
 # Speed limit configuration
 use_inferred_speed_limits: true  # If true, infer location-based speed limits from data; if false, use default V_f
@@ -34,13 +34,14 @@ seed: 25
 
 # Two-stage optimization (ADAM then L-BFGS)
 use_lbfgs: true        # Enable L-BFGS refinement after ADAM
-lbfgs_epochs: 400      # Number of L-BFGS epochs (null = epochs//100)
+lbfgs_epochs: 200      # Number of L-BFGS epochs (null = epochs//100)
 
 # Model training options
 run_base: false  # whether to train baseline NN model (f_weight=0.0) for comparison
 
 # Output
-out_fig_dir: FD_Sobol_5day_5s_10knf_lbfgs_2speed_prop
+# out_fig_dir: FD_Sobol_5day_5s_10knf_lbfgs_2speed_prop
+out_fig_dir: FD_linear_2speed_w20_fd100
 plot_loss_history: true   # Whether to plot and save training loss history
 loss_plot_log_scale: true # Use log scale for loss plots
 

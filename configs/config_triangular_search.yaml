@@ -1,0 +1,61 @@
+# Hyperparameter search configuration for Triangular FD
+
+# Data sources
+data_file: data/A13_Velocity_Data_0909-0910.txt
+distance_json: td_data/2024-09-09.json
+
+# Model architecture
+layers: [2, 20, 20, 20, 20, 20, 20, 20, 20, 1]
+
+# Physics weight (fixed for triangular FD comparison)
+f_weight: 0.1
+
+# Triangular FD hyperparameters to search
+# w: Wave speed parameter (controls congestion wave propagation)
+#    - Lower values: slower congestion waves
+#    - Higher values: faster congestion waves
+#    - Typical range: [10, 20, 30, 40, 50]
+w_list: [10.0, 20.0, 30.0, 40.0]
+
+# alpha: Sigmoid steepness (controls transition sharpness)
+#    - Lower values: smooth transition between free-flow and congestion
+#    - Higher values: sharp transition between regimes
+#    - Typical range: [5, 10, 20, 40, 80]
+alpha_list: [5.0, 10.0, 20.0, 40.0]
+
+# Speed limit configuration
+use_inferred_speed_limits: false
+V_f: 100.0
+speed_limit_percentile: 95
+valid_speed_limits: [80, 100]
+
+# Physics collocation points
+N_f: 10000
+physics_every: 1
+
+# Optimization
+epochs: 10000
+lr: 0.0001
+log_every: 500
+patience: 2000
+seed: 25
+
+# Two-stage optimization (ADAM then L-BFGS)
+use_lbfgs: true
+lbfgs_epochs: 300
+
+# Output visualization
+plot_loss_history: true
+loss_plot_log_scale: true
+
+# Experiment grid
+num_runs: 3
+sensor_list: [5]
+
+# Output directories and files
+base_run_dir: Results_triangle/triangular_search/runs
+results_out: Results_triangle/triangular_search/summary/triangular_results.csv
+summary_out: Results_triangle/triangular_search/summary/triangular_summary.csv
+
+# Fast mode for smoke tests
+fast: false

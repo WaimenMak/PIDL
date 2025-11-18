@@ -69,6 +69,7 @@ from ojits03_a13_pytorch_revised import UnifiedPINN, build_model
 
 def load_trained_model(
     model_dir: str,
+    model_tag: str,
     fd_name: str,
     X_u_train: np.ndarray,
     u_train: np.ndarray,
@@ -76,13 +77,15 @@ def load_trained_model(
     layers: List[int],
     lb: np.ndarray,
     ub: np.ndarray,
+    V_f = 100.0,
     speed_limits_df: pd.DataFrame = None,
 ) -> UnifiedPINN:
     """Load a previously trained model from checkpoint.
     
     Args:
         model_dir: Directory containing the model checkpoint
-        fd_name: The fd_name tag used for the checkpoint filename
+        model_tag: The tag used for the checkpoint filename (e.g., 'linear_fw1.0')
+        fd_name: The actual fundamental diagram type (e.g., 'linear', 'nn')
         X_u_train, u_train, X_f_train, layers, lb, ub: Model building parameters
         speed_limits_df: Optional DataFrame with location-based speed limits
     
@@ -92,8 +95,8 @@ def load_trained_model(
     import torch
     import json
     
-    ckpt_path = os.path.join(model_dir, f"model_{fd_name}.pt")
-    meta_path = os.path.join(model_dir, f"model_{fd_name}_meta.json")
+    ckpt_path = os.path.join(model_dir, f"model_{model_tag}.pt")
+    meta_path = os.path.join(model_dir, f"model_{model_tag}_meta.json")
     
     # Load metadata to get f_weight
     with open(meta_path, 'r') as f:
@@ -101,8 +104,8 @@ def load_trained_model(
     
     f_weight = meta.get('f_weight', 1.0)
     
-    # Build model architecture with speed limits
-    model = build_model(X_u_train, u_train, X_f_train, layers, lb, ub, f_weight=f_weight, fd_name=fd_name, speed_limits_df=speed_limits_df)
+    # Build model architecture with speed limits using actual fd_name
+    model = build_model(X_u_train, u_train, X_f_train, layers, lb, ub, f_weight=f_weight, fd_name=fd_name, V_f=V_f, speed_limits_df=speed_limits_df)
     
     # Load checkpoint
     state = torch.load(ckpt_path, map_location=model.device)
@@ -160,13 +163,13 @@ def parse_args() -> argparse.Namespace:
 
 def run_single(
     sensor_count: int,
+    N_f: int,
     run_idx: int,
     base_seed: int,
     vel_df: pd.DataFrame,
     x: np.ndarray,
     t: np.ndarray,
     layers: List[int],
-    N_f: int,
     epochs: int,
     lr: float,
     log_every: int,
@@ -174,23 +177,28 @@ def run_single(
     base_run_dir: str,
     physics_every: int,
     fd_name_list: List[str],
+    f_weight_list: List[float],
     use_inferred_speed_limits: bool = True,
-    V_f: float = 110.0,
+    V_f: float = 100.0,
     speed_limit_percentile: int = 95,
     valid_speed_limits: tuple = (80, 100),
     use_lbfgs: bool = True,
     lbfgs_epochs: int | None = None,
     plot_loss_history_flag: bool = True,
     loss_plot_log_scale: bool = True,
+    noise_level: float = 0.0,
+    noise_type: str = "relative_gaussian",
 ) -> List[Dict[str, Any]]:
-    """Run one sensor configuration for one seed, training models for each fd_name.
+    """Run one sensor configuration with one N_f value for one seed, training models for each fd_name.
     Returns a list of per-model result dicts.
     """
     set_seed(base_seed + run_idx)
 
     # Prepare grids and labels
-    Exact = np.real(vel_df.T)
-    X, T, X_star = build_space_time_grid(x, t)
+    # Keep Exact as (n_locations, n_timesteps) - NO transpose
+    # Flip vertically to match flipped x coordinates (if x is flipped)
+    Exact = np.flipud(np.real(vel_df.values))
+    T, X, X_star = build_space_time_grid(x, t)
     idx_grid = build_index_grid(Exact, t)
     u_star = Exact.flatten()[:, None]
     u_star, n_missing, u_mean = replace_missing_with_mean(u_star)
@@ -205,7 +213,7 @@ def run_single(
         print(f"  Using inferred speed limits ({speed_limit_percentile}th percentile, range: {df_free_flow['limit_assigned'].min():.1f}-{df_free_flow['limit_assigned'].max():.1f} km/h)")
     else:
         df_free_flow = None
-        print(f"  Using default constant free-flow speed: {V_f:.1f} km/h")
+        print(f"  Using default constant free-flow speed: {V_f:.1f} km/h)")
 
     lb = X_star.min(0).astype(np.float32)
     ub = X_star.max(0).astype(np.float32)
@@ -217,16 +225,44 @@ def run_single(
     X_u_train, u_train, idx_train, n_valid, sensors, sensor_point_counts = select_sensor_columns(
         u_star, X_star, n_locations, n_timesteps, sensor_count
     )
-
+    print(f"  - Total available locations: {n_locations}")
+    print(f"  - Requested sensors: {sensor_count}")
+    print(f"  - Selected sensors: {len(sensors)} (equally spaced)")
+    print(f"  - Sensor indices: {sensors}")
+    print(f"  - Total observation points: {n_valid}")
+    # Optional noise injection on observable sensor readings only
+    if noise_level and noise_level > 0.0:
+        nl = float(noise_level)
+        if noise_type == "relative_gaussian":
+            eps = np.random.normal(loc=0.0, scale=nl, size=u_train.shape)
+            u_train = u_train * (1.0 + eps)
+        else:
+            raise ValueError(f"Unsupported noise_type: {noise_type}")
+        print(f"  - Applied noise: type={noise_type}, level={nl*100:.0f}% to {u_train.shape[0]} observations")
     # Collocation
     X_f_train = make_collocation(lb, ub, N_f, X_u_train)
 
-    # Run directory for this sensor count + run
-    run_root = os.path.join(base_run_dir, f"NS{sensor_count}", f"run_{run_idx}")
+    # Run directory for this sensor count + N_f + run
+    run_root = os.path.join(base_run_dir, f"NS{sensor_count}_Nf{N_f}", f"run_{run_idx}")
     ensure_dir(run_root)
 
+    # Build model configuration list: combination of fd_name and f_weight
+    # For 'nn', always use f_weight=0.0 once (no duplicates)
+    # For PINNs, test each f_weight in the list
+    model_configs = []
+    for fd_name in fd_name_list:
+        if fd_name.lower() == 'nn':
+            # Pure NN: always f_weight=0.0, only add once
+            model_configs.append({'fd_name': fd_name, 'f_weight': 0.0})
+        else:
+            # PINN: test each f_weight in the list
+            for f_weight in f_weight_list:
+                model_configs.append({'fd_name': fd_name, 'f_weight': f_weight})
+    
     # Check if all models already exist for this run
-    eval_mode = check_all_models_exist(run_root, fd_name_list)
+    # Use 'd' instead of '.' in tags to avoid file extension issues
+    model_tags = [f"{cfg['fd_name']}_fw{str(cfg['f_weight']).replace('.', 'd')}" for cfg in model_configs]
+    eval_mode = check_all_models_exist(run_root, model_tags)
     
     if eval_mode:
         print(f"  [EVAL MODE] All models found in {run_root}. Loading and evaluating...")
@@ -236,48 +272,50 @@ def run_single(
     rows: List[Dict[str, Any]] = []
     model_predictions: List[Dict[str, Any]] = []
 
-    # Train or evaluate one model per fd_name
-    for fd_name in fd_name_list:
-        model_dir = os.path.join(run_root, fd_name)
+    # Train or evaluate one model per configuration
+    for cfg in model_configs:
+        fd_name = cfg['fd_name']
+        f_weight = cfg['f_weight']
+        # Use 'd' instead of '.' in tag to avoid file extension issues (e.g., 1.0 -> 1d0)
+        model_tag = f"{fd_name}_fw{str(f_weight).replace('.', 'd')}"
+        model_dir = os.path.join(run_root, model_tag)
         ensure_dir(model_dir)
 
-        # Determine f_weight: if fd_name is 'nn' or 'NN', use 0.0, else 1.0
-        f_weight = 0.0 if fd_name.lower() == 'nn' else 1.0
         model_type = 'NN' if f_weight == 0.0 else 'PINN'
 
-        if eval_mode and check_model_exists(model_dir, fd_name):
+        if eval_mode and check_model_exists(model_dir, model_tag):
             # Load existing model and evaluate
-            print(f"  Loading existing model: fd_name={fd_name}...")
+            print(f"  Loading existing model: fd_name={fd_name}, f_weight={f_weight}...")
             model = load_trained_model(
-                model_dir, fd_name, X_u_train, u_train, X_f_train,
-                layers, lb, ub, speed_limits_df=df_free_flow
+                model_dir, model_tag, fd_name, X_u_train, u_train, X_f_train,
+                layers, lb, ub, V_f=V_f, speed_limits_df=df_free_flow
             )
-            train_time = 0.0  # No training time for loaded models
-            error_u, U_pred, _ = evaluate_model(model, X_star, u_star, X, T, Exact)
+            error_u, U_pred, _ = evaluate_model(model, X_star, u_star, T, X, Exact)
             
             # Get checkpoint paths
-            ckpt_path = os.path.join(model_dir, f"model_{fd_name}.pt")
-            meta_path = os.path.join(model_dir, f"model_{fd_name}_meta.json")
+            ckpt_path = os.path.join(model_dir, f"model_{model_tag}.pt")
+            meta_path = os.path.join(model_dir, f"model_{model_tag}_meta.json")
             
-            # Load metadata for best_epoch and best_train info
+            # Load metadata for best_epoch, best_train, and train_time
             import json
             with open(meta_path, 'r') as f:
                 meta = json.load(f)
             best_epoch = meta.get('best_epoch', -1)
             best_train = meta.get('best_train', -1.0)
+            train_time = meta.get('train_time_sec', 0.0)
             
             # Get history for plotting if available
             history = meta.get('history', {"epoch": [], "train_total": [], "data_loss": [], "phys_loss": []})
             
         else:
             # Train new model
-            print(f"  Training fd_name={fd_name}...")
-            model = build_model(X_u_train, u_train, X_f_train, layers, lb, ub, f_weight=f_weight, fd_name=fd_name, speed_limits_df=df_free_flow)
+            print(f"  Training fd_name={fd_name}, f_weight={f_weight}...")
+            model = build_model(X_u_train, u_train, X_f_train, layers, lb, ub, f_weight=f_weight, fd_name=fd_name, V_f=V_f, speed_limits_df=df_free_flow)
             start = time.time()
             out = model.fit(
                 epochs=epochs, lr=lr,
                 early_stop=EarlyStopConfig(patience=patience, min_delta=0.0, verbose=True),
-                save_dir=model_dir, tag=fd_name,
+                save_dir=model_dir, tag=model_tag,
                 log_every=log_every,
                 f_subset_per_epoch=min(4000, X_f_train.shape[0]),
                 physics_every=physics_every, use_mixed_precision=True,
@@ -285,26 +323,39 @@ def run_single(
                 lbfgs_epochs=lbfgs_epochs,
             )
             train_time = time.time() - start
-            error_u, U_pred, _ = evaluate_model(model, X_star, u_star, X, T, Exact)
+            error_u, U_pred, _ = evaluate_model(model, X_star, u_star, T, X, Exact)
             
             best_epoch = out['best_epoch']
             best_train = out['best_train']
             ckpt_path = out['checkpoint_path']
             meta_path = out['meta_path']
             history = out['history']
+            
+            # Save training time to metadata
+            import json
+            with open(meta_path, 'r') as f:
+                meta = json.load(f)
+            meta['train_time_sec'] = train_time
+            with open(meta_path, 'w') as f:
+                json.dump(meta, f, indent=2)
+            print(f"  Saved train_time={train_time:.2f}s to metadata")
         
         # Plot training history
         if plot_loss_history_flag and history['epoch']:
             plot_training_history(
                 history=history,
                 out_dir=run_root,
-                tag=fd_name,
+                tag=model_tag,
                 show_physics=(f_weight > 0.0),
                 log_scale=loss_plot_log_scale,
             )
 
         # Collect for plotting
-        display_name = f"{model_type} ({fd_name})" if model_type == 'PINN' else f"NN ({fd_name})"
+        if f_weight == 0.0:
+            display_name = f"NN ({fd_name})"
+        else:
+            display_name = f"PINN ({fd_name}, fw={f_weight})"
+        
         model_predictions.append({
             'name': display_name,
             'U_pred': U_pred,
@@ -314,12 +365,15 @@ def run_single(
         # Collect results row
         rows.append({
             'sensor_count': sensor_count,
+            'N_f': N_f,
             'run_idx': run_idx,
             'seed': base_seed + run_idx,
             'fd_name': fd_name,
             'model': model_type,
             'f_weight': f_weight,
             'n_valid': n_valid,
+            'noise_level': noise_level,
+            'noise_type': noise_type,
             'best_epoch': best_epoch,
             'best_train': best_train,
             'error_u': error_u,
@@ -341,15 +395,21 @@ def run_single(
 
 def summarize_results(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Compute mean and std over runs for each combination of sensor_count, fd_name, and model.
+    Compute mean and std over runs for each combination of sensor_count, N_f, fd_name, model,
+    and, when present, noise_level and noise_type.
     """
-    grouped = df.groupby(['sensor_count', 'fd_name', 'model'])
+    group_cols = ['sensor_count', 'N_f', 'fd_name', 'model']
+    if 'noise_level' in df.columns:
+        group_cols.append('noise_level')
+    if 'noise_type' in df.columns:
+        group_cols.append('noise_type')
+    grouped = df.groupby(group_cols)
     summary = grouped['error_u'].agg(['mean', 'std']).reset_index()
     summary = summary.rename(columns={'mean': 'error_u_mean', 'std': 'error_u_std'})
     # Optionally include best_train summary, too
     bt = grouped['best_train'].agg(['mean', 'std']).reset_index().rename(
         columns={'mean': 'best_train_mean', 'std': 'best_train_std'})
-    summary = pd.merge(summary, bt, on=['sensor_count', 'fd_name', 'model'], how='left')
+    summary = pd.merge(summary, bt, on=group_cols, how='left')
     return summary
 
 
@@ -367,7 +427,12 @@ def main():
     data_file: str = cfg.get('data_file', 'data/A13_Velocity_Data_0909-0910.txt')
     distance_json: str = cfg.get('distance_json', 'td_data/2024-09-09.json')
     layers: List[int] = cfg.get('layers', [2, 20, 20, 20, 20, 20, 20, 20, 20, 1])
-    N_f: int = int(cfg.get('N_f', 10000))
+    N_f_list: List[int] = cfg.get('N_f_list', [])
+    if not N_f_list:
+        # Fallback to single N_f value for backward compatibility
+        N_f_list = [int(cfg.get('N_f', 10000))]
+    else:
+        N_f_list = [int(nf) for nf in N_f_list]
     epochs: int = int(cfg.get('epochs', 10000))
     lr: float = float(cfg.get('lr', 1e-4))
     log_every: int = int(cfg.get('log_every', 200))
@@ -375,6 +440,7 @@ def main():
     num_runs: int = int(cfg.get('num_runs', 5))
     sensor_list: List[int] = cfg.get('sensor_list', [])
     fd_name_list: List[str] = cfg.get('fd_name_list', ['linear', 'nn'])
+    f_weight_list: List[float] = cfg.get('f_weight_list', [1.0])
     base_run_dir: str = cfg.get('base_run_dir', 'runs/a13_multi')
     results_out: str = cfg.get('results_out', 'Results/a13_multi_results.csv')
     summary_out: str = cfg.get('summary_out', 'Results/a13_multi_summary.csv')
@@ -383,7 +449,7 @@ def main():
     physics_every: int = int(cfg.get('physics_every', 1))
     # Speed limit parameters
     use_inferred_speed_limits: bool = bool(cfg.get('use_inferred_speed_limits', True))
-    V_f: float = float(cfg.get('V_f', 110.0))
+    V_f: float = float(cfg.get('V_f', 100.0))
     speed_limit_percentile: int = int(cfg.get('speed_limit_percentile', 95))
     valid_speed_limits: tuple = tuple(cfg.get('valid_speed_limits', [80, 100]))
     # Two-stage optimization parameters
@@ -392,79 +458,115 @@ def main():
     # Plotting parameters
     plot_loss_history_flag: bool = bool(cfg.get('plot_loss_history', True))
     loss_plot_log_scale: bool = bool(cfg.get('loss_plot_log_scale', True))
+    # Noise parameters
+    noise_type: str = str(cfg.get('noise_type', 'relative_gaussian'))
+    noise_levels: List[float] = [float(v) for v in cfg.get('noise_levels', [])] if 'noise_levels' in cfg else [float(cfg.get('noise_level', 0.0))]
 
     if not sensor_list:
         raise ValueError("sensor_list must be provided in the multi-experiment config")
     if not fd_name_list:
         raise ValueError("fd_name_list must be provided in the multi-experiment config")
+    if not N_f_list:
+        raise ValueError("N_f_list must be provided in the multi-experiment config (or use N_f for single value)")
 
     # Fast mode reductions
     if fast:
         epochs = min(epochs, 2)
-        N_f = min(N_f, 2000)
+        N_f_list = [min(nf, 2000) for nf in N_f_list]
         print('[FAST] Using reduced epochs and collocation points for a smoke test')
-
-    # Ensure result directories exist
-    res_dirname = os.path.dirname(results_out)
-    sum_dirname = os.path.dirname(summary_out)
-    if res_dirname:
-        ensure_dir(res_dirname)
-    if sum_dirname:
-        ensure_dir(sum_dirname)
 
     # Load data once
     vel_df = load_velocity_table(data_file)
     x = load_distances(distance_json, n_locations_hint=vel_df.shape[0])
+    # Flip x to have start of highway at top (higher km at index 0)
+    x = np.flipud(x)
     t = np.arange(vel_df.shape[1]).reshape(-1, 1)
 
-    all_rows: List[Dict[str, Any]] = []
+    # Iterate noise levels, then N_f values, sensor counts, and runs
+    for nl in noise_levels:
+        nl_pct = int(round(nl * 100))
+        suffix = f"_Gn_{nl_pct}"
+        # Paths with suffix
+        base_run_dir_n = f"{base_run_dir}{suffix}"
+        def add_suffix_to_csv(path: str) -> str:
+            root, ext = os.path.splitext(path)
+            if ext.lower() == '.csv':
+                return f"{root}{suffix}{ext}"
+            return f"{path}{suffix}"
+        results_out_n = add_suffix_to_csv(results_out)
+        summary_out_n = add_suffix_to_csv(summary_out)
 
-    # Iterate sensor counts and runs
-    for sensor_count in sensor_list:
-        print(f"\n=== Sensor count: {sensor_count} ===")
-        for run_idx in range(1, num_runs + 1):
-            print(f"-- Run {run_idx}/{num_runs}")
-            rows = run_single(
-                sensor_count=sensor_count,
-                run_idx=run_idx,
-                base_seed=seed,
-                vel_df=vel_df,
-                x=x,
-                t=t,
-                layers=layers,
-                N_f=N_f,
-                epochs=epochs,
-                lr=lr,
-                log_every=log_every,
-                patience=patience,
-                base_run_dir=base_run_dir,
-                physics_every=physics_every,
-                fd_name_list=fd_name_list,
-                use_inferred_speed_limits=use_inferred_speed_limits,
-                V_f=V_f,
-                speed_limit_percentile=speed_limit_percentile,
-                valid_speed_limits=valid_speed_limits,
-                use_lbfgs=use_lbfgs,
-                lbfgs_epochs=lbfgs_epochs,
-                plot_loss_history_flag=plot_loss_history_flag,
-                loss_plot_log_scale=loss_plot_log_scale,
-            )
-            all_rows.extend(rows)
+        # Ensure result directories exist for this noise level
+        res_dirname = os.path.dirname(results_out_n)
+        sum_dirname = os.path.dirname(summary_out_n)
+        if res_dirname:
+            ensure_dir(res_dirname)
+        if sum_dirname:
+            ensure_dir(sum_dirname)
 
-        # After each sensor_count, persist interim
-        df_interim = pd.DataFrame(all_rows)
-        df_interim.to_csv(results_out, index=False)
-        print(f"Saved interim results to {results_out}")
+        print(f"\n{'='*60}")
+        print(f"=== Noise level: {nl_pct}% ({noise_type}) ===")
+        print(f"Save suffix: {suffix}")
+        print(f"Runs dir: {base_run_dir_n}")
+        print(f"Results: {results_out_n}")
+        print(f"Summary: {summary_out_n}")
+        print(f"{'='*60}")
 
-    # Final save of per-run results
-    results_df = pd.DataFrame(all_rows)
-    results_df.to_csv(results_out, index=False)
-    print(f"Saved per-run results to {results_out}")
+        all_rows: List[Dict[str, Any]] = []
 
-    # Summary
-    summary_df = summarize_results(results_df)
-    summary_df.to_csv(summary_out, index=False)
-    print(f"Saved summary to {summary_out}")
+        # Iterate N_f values, sensor counts, and runs
+        for N_f in N_f_list:
+            print(f"\n{'-'*60}")
+            print(f"--- Collocation points (N_f): {N_f} ---")
+            print(f"{'-'*60}")
+            for sensor_count in sensor_list:
+                print(f"\n=== Sensor count: {sensor_count} ===")
+                for run_idx in range(1, num_runs + 1):
+                    print(f"-- Run {run_idx}/{num_runs}")
+                    rows = run_single(
+                        sensor_count=sensor_count,
+                        N_f=N_f,
+                        run_idx=run_idx,
+                        base_seed=seed,
+                        vel_df=vel_df,
+                        x=x,
+                        t=t,
+                        layers=layers,
+                        epochs=epochs,
+                        lr=lr,
+                        log_every=log_every,
+                        patience=patience,
+                        base_run_dir=base_run_dir_n,
+                        physics_every=physics_every,
+                        fd_name_list=fd_name_list,
+                        f_weight_list=f_weight_list,
+                        use_inferred_speed_limits=use_inferred_speed_limits,
+                        V_f=V_f,
+                        speed_limit_percentile=speed_limit_percentile,
+                        valid_speed_limits=valid_speed_limits,
+                        use_lbfgs=use_lbfgs,
+                        lbfgs_epochs=lbfgs_epochs,
+                        plot_loss_history_flag=plot_loss_history_flag,
+                        loss_plot_log_scale=loss_plot_log_scale,
+                        noise_level=nl,
+                        noise_type=noise_type,
+                    )
+                    all_rows.extend(rows)
+
+                # After each sensor_count, persist interim for this noise level
+                df_interim = pd.DataFrame(all_rows)
+                df_interim.to_csv(results_out_n, index=False)
+                print(f"Saved interim results to {results_out_n}")
+
+        # Final save of per-run results for this noise level
+        results_df = pd.DataFrame(all_rows)
+        results_df.to_csv(results_out_n, index=False)
+        print(f"Saved per-run results to {results_out_n}")
+
+        # Summary for this noise level
+        summary_df = summarize_results(results_df)
+        summary_df.to_csv(summary_out_n, index=False)
+        print(f"Saved summary to {summary_out_n}")
 
 
 if __name__ == '__main__':
